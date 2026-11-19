@@ -1,22 +1,32 @@
 // 兼容处理：生产打包环境下 dunder-proto 查找 call-bind-apply-helpers 的嵌套寻址回退
 const Module = require('module')
+const path = require('path')
 const origResolve = Module._resolveFilename
 Module._resolveFilename = function (request, parent, isMain, options) {
   try {
     return origResolve.call(this, request, parent, isMain, options)
   } catch (err) {
     if (request === 'call-bind-apply-helpers' || request.startsWith('call-bind-apply-helpers/')) {
-      const sub = request.replace(/^call-bind-apply-helpers/, '')
-      try {
-        return require.resolve(`call-bind/node_modules/call-bind-apply-helpers${sub}`)
-      } catch (_) {}
+      const sub = request.slice('call-bind-apply-helpers'.length)
+      const candidates = [
+        path.join(__dirname, '..', 'node_modules', 'call-bind-apply-helpers' + (sub || '/index.js')),
+        path.join(__dirname, '..', 'node_modules', 'call-bind', 'node_modules', 'call-bind-apply-helpers' + (sub || '/index.js')),
+        ...(process.resourcesPath ? [
+          path.join(process.resourcesPath, 'app.asar', 'node_modules', 'call-bind-apply-helpers' + (sub || '/index.js')),
+          path.join(process.resourcesPath, 'app.asar', 'node_modules', 'call-bind', 'node_modules', 'call-bind-apply-helpers' + (sub || '/index.js'))
+        ] : [])
+      ]
+      for (const cand of candidates) {
+        try {
+          return origResolve.call(this, cand, parent, isMain, options)
+        } catch (_) {}
+      }
     }
     throw err
   }
 }
 
 const { app, BrowserWindow } = require('electron')
-const path = require('path')
 const { registerIpc } = require('./ipc')
 
 let mainWindow = null

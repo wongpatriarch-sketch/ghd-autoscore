@@ -41,7 +41,8 @@
     "files": [
       "dist/index.html",
       "dist/assets/**/*",
-      "electron/**/*"
+      "electron/**/*",
+      "node_modules/call-bind-apply-helpers/**/*"
     ],
     "win": {
       "target": "nsis"
