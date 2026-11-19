@@ -170,7 +170,7 @@ async function cell (file, r, c) {
     const files = fs.readdirSync(dir).filter(f => f.endsWith('.xlsx'))
     assert(files.length > 0, '应有备份文件')
     assert(files.length <= 20, `备份应 ≤20 份，实际 ${files.length}`)
-    assert(/^\d{8}_\d{6}_总积分\.xlsx$/.test(files[0]), `命名格式: ${files[0]}`)
+    assert(/^\d{8}_\d{6}(?:_\d+)?_总积分\.xlsx$/.test(files[0]), `命名格式: ${files[0]}`)
   })
 
   await t('不存在的文件返回 NOT_FOUND 而非崩溃', async () => {
