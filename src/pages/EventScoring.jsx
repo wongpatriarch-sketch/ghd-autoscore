@@ -40,13 +40,17 @@ export default function EventScoring ({ cfg, excel, reloadExcel, updateConfig, s
 
   const validate = () => {
     setFormError('')
-    if (!activityName.trim()) return '请填写活动名称（将作为 Excel 新列表头）'
+    const trimmed = activityName.trim()
+    if (!trimmed) return '请填写活动名称（将作为 Excel 新列表头）'
+    if (excel?.headers?.slice(0, 6)?.includes(trimmed)) {
+      return `「${trimmed}」与主表前 6 列固定列名冲突，不能用作活动名称`
+    }
     const heads = parseNames(headCoaches)
     if (heads.length < 1 || heads.length > 5) return '主教官需填写 1~5 位人名，不能为空'
     if (trainings.some(t => !parseNames(t.coaches).length && !parseNames(t.participants).length)) return '存在完全空的训练卡片，请补充名单或删除该卡片'
     if (rehearsals.some(r => !parseNames(r.coaches).length && !parseNames(r.participants).length)) return '存在完全空的彩排卡片，请补充名单或删除该卡片'
     if (!parseNames(formal.participants).length) return '正式活动「参加」名单不能为空'
-    if (excel?.activityColumns?.some(c => c.name === activityName.trim())) return `主表中已存在同名活动列「${activityName.trim()}」，请更换活动名称`
+    if (excel?.activityColumns?.some(c => c.name === trimmed)) return `主表中已存在同名活动列「${trimmed}」，请更换活动名称`
     return ''
   }
 

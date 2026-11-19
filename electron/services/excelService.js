@@ -197,9 +197,14 @@ async function commitEvent (excelPath, { activityName, scores }) {
     const name = String(activityName).trim()
     if (!name) return { ok: false, code: 'BAD_NAME', error: '活动名称不能为空' }
     const colCount = Math.max(ws.actualColumnCount || 0, FIXED_COLS)
-    for (let c = FIXED_COLS + 1; c <= colCount; c++) {
+    for (let c = 1; c <= colCount; c++) {
       if (textOf(ws.getRow(1).getCell(c).value) === name) {
-        return { ok: false, code: 'DUP_COLUMN', error: `已存在同名活动列「${name}」，请更换活动名称` }
+        const isFixed = c <= FIXED_COLS
+        return {
+          ok: false,
+          code: 'DUP_COLUMN',
+          error: isFixed ? `「${name}」为前 6 列固定列名，不能用作活动名称` : `已存在同名活动列「${name}」，请更换活动名称`
+        }
       }
     }
 
