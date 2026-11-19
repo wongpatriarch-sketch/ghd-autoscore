@@ -17,6 +17,8 @@
     "test:render": "node tests/render.test.cjs"
   },
   "dependencies": {
+    "call-bind-apply-helpers": "^1.0.2",
+    "dunder-proto": "^1.0.1",
     "exceljs": "^4.4.0"
   },
   "devDependencies": {
@@ -37,11 +39,19 @@
     "appId": "com.ghd.autoscore",
     "productName": "国护积分管理",
     "files": [
-      "dist/**/*",
+      "dist/index.html",
+      "dist/assets/**/*",
       "electron/**/*"
     ],
     "win": {
       "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "国护积分管理"
     },
     "mac": {
       "target": "dmg"
