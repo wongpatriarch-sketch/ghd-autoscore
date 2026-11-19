@@ -243,18 +243,27 @@ function PreviewModal ({ wizard, busy, roster, duplicateNames, onClose, onBack, 
   const resolutions = wizard.resolutions || {}
   const setResolution = (name, v) => setWizard(w => ({ ...w, resolutions: { ...w.resolutions, [name]: v } }))
 
-  // 内存结算：合并同名行，未知行按处理方案映射/忽略
+  // 内存结算：在册人员按姓名聚合，未在册异常人员保持独立以便随时修改映射
   const rows = useMemo(() => {
     const map = new Map()
     for (const e of entries) {
+      const isKnown = rosterSet.has(e.name)
       let name = e.name
       let status = 'ok'
-      if (!rosterSet.has(name)) {
-        const r = resolutions[name]
-        if (!r || r === 'ignore') { status = 'ignored'; } else { name = r; status = 'mapped' }
+      if (!isKnown) {
+        const r = resolutions[e.name]
+        if (!r || r === 'ignore') {
+          status = 'ignored'
+        } else {
+          name = r
+          status = 'mapped'
+        }
       }
-      const key = `${name}#${status === 'ignored' ? e.name : ''}`
-      if (!map.has(key)) map.set(key, { rawName: e.name, name: status === 'ignored' ? e.name : name, count: 0, status })
+      // 在册人员以其花名册名字聚合；未在册异常人员以原始 rawName 保持独立，防止映射后行被合并消失
+      const key = isKnown ? `roster::${e.name}` : `unknown::${e.name}`
+      if (!map.has(key)) {
+        map.set(key, { rawName: e.name, name, count: 0, status, isKnown })
+      }
       map.get(key).count = round1(map.get(key).count + e.count)
     }
     return [...map.values()].map(r => ({ ...r, delta: round1(r.count * multiplier) }))
@@ -358,10 +367,17 @@ function PreviewModal ({ wizard, busy, roster, duplicateNames, onClose, onBack, 
           </thead>
           <tbody>
             {rows.map((r, i) => (
-              <tr key={i} className={`border-b border-white/[0.04] ${r.status !== 'ok' ? 'bg-amber-500/[0.08]' : ''}`}>
+              <tr key={r.rawName || i} className={`border-b border-white/[0.04] ${!r.isKnown ? 'bg-amber-500/[0.08]' : ''}`}>
                 <td className="td">
-                  {r.status === 'mapped' ? <span className="line-through text-zinc-500 mr-1.5">{r.rawName}</span> : null}
-                  <span className={r.status === 'ignored' ? 'text-zinc-500' : 'text-zinc-100'}>{r.name}</span>
+                  {r.status === 'mapped' ? (
+                    <span className="flex items-center gap-1.5 flex-wrap">
+                      <span className="line-through text-zinc-500 text-xs">{r.rawName}</span>
+                      <span className="text-zinc-400 text-xs">➔</span>
+                      <span className="text-emerald-300 font-medium">{r.name}</span>
+                    </span>
+                  ) : (
+                    <span className={r.status === 'ignored' ? 'text-zinc-500 line-through' : 'text-zinc-100'}>{r.name}</span>
+                  )}
                   {dupSet.has(r.name) && r.status !== 'ignored' && <span className="ml-2"><Badge tone="amber">同名待核对</Badge></span>}
                 </td>
                 <td className="td text-right font-mono text-zinc-300">{r.count}</td>
@@ -370,7 +386,7 @@ function PreviewModal ({ wizard, busy, roster, duplicateNames, onClose, onBack, 
                   {r.status === 'ignored' ? '跳过' : `+${r.delta}`}
                 </td>
                 <td className="td">
-                  {r.status !== 'ok'
+                  {!r.isKnown
                     ? (
                       <select
                         className="input !py-1 !text-xs w-full"
@@ -391,7 +407,7 @@ function PreviewModal ({ wizard, busy, roster, duplicateNames, onClose, onBack, 
 
       <div className="mt-4 flex items-center justify-between">
         <div className="text-xs text-zinc-500">
-          实际写入 <b className="text-zinc-200">{effective.length}</b> 人，合计 <b className="text-emerald-300">+{round1(effective.reduce((a, b) => a + b.delta, 0))}</b> 分
+          实际写入 <b className="text-zinc-200">{new Set(effective.map(r => r.name)).size}</b> 人，合计 <b className="text-emerald-300">+{round1(effective.reduce((a, b) => a + b.delta, 0))}</b> 分
         </div>
         <div className="flex gap-3">
           <button className="btn-ghost" onClick={() => onBack(wizard)} disabled={submitting}>上一步</button>

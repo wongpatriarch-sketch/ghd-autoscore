@@ -338,6 +338,8 @@ async function readExternal (filePath, mode) {
     const ws = wb.worksheets[0]
     if (!ws) return { ok: false, code: 'EMPTY', error: '导入文件中没有工作表' }
 
+    const cleanHeader = s => String(s || '').replace(/[\s\u3000]+/g, '')
+    const SPACED_CN_NAME = /^[\u4e00-\u9fa5](?:[\s\u3000]+[\u4e00-\u9fa5]){1,2}$/
     let headerRowIdx = null
     let nameCol = null
     let valueCol = null
@@ -347,14 +349,14 @@ async function readExternal (filePath, mode) {
       const cols = []
       row.eachCell((cell, c) => {
         const t = textOf(cell.value)
-        if (t) cols.push({ t, c })
+        if (t) cols.push({ t, c, clean: cleanHeader(t) })
       })
-      const nc = cols.find(x => x.t === '姓名')
+      const nc = cols.find(x => x.clean === '姓名')
       if (mode === 'count') {
-        const vc = cols.find(x => x.t === '总次数')
+        const vc = cols.find(x => x.clean === '总次数')
         if (nc && vc) { headerRowIdx = r; nameCol = nc.c; valueCol = vc.c; break }
       } else {
-        const vcs = cols.filter(x => x.t === '总积分')
+        const vcs = cols.filter(x => x.clean === '总积分')
         if (nc && vcs.length) {
           headerRowIdx = r; nameCol = nc.c
           valueCol = vcs[vcs.length - 1].c
@@ -370,8 +372,9 @@ async function readExternal (filePath, mode) {
     const entries = []
     for (let r = headerRowIdx + 1; r <= ws.rowCount; r++) {
       const row = ws.getRow(r)
-      const name = textOf(row.getCell(nameCol).value)
+      let name = textOf(row.getCell(nameCol).value)
       if (!name || COHORT_RE.test(name)) continue
+      if (SPACED_CN_NAME.test(name)) name = name.replace(/[\s\u3000]+/g, '')
       const count = numOr0(row.getCell(valueCol).value)
       entries.push({ name, count })
     }
