@@ -5,7 +5,7 @@ const { backupExcel } = require('./backupService')
 const lockService = require('./lockService')
 
 const FIXED_COLS = 6 // A姓名 B夜训周训 C升降旗 D后勤部 E综办部 F汇总
-const COHORT_RE = /^--\s*(\d+)\s*届--$/
+const COHORT_RE = /^[-—–]{2,}\s*第?\s*(\d+)\s*届\s*[-—–]{2,}$/
 
 function textOf (v) {
   if (v === null || v === undefined) return ''
