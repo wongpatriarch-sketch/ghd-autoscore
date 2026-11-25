@@ -1,10 +1,11 @@
 import React, { useMemo, useState } from 'react'
 import { Modal, Badge, ConfirmModal, Empty } from '../components/ui.jsx'
+import { IconLock } from '../components/icons.jsx'
 import { computeStatusMap, currentScoresOf, TYPE_LABELS } from '../lib/historyStack.js'
-import { fmtTime, makeBatchId, round1 } from '../lib/utils.js'
+import { fmtTime, makeBatchId, round4 } from '../lib/utils.js'
 import { api } from '../lib/api.js'
 
-export default function HistoryCenter ({ cfg, excel, reloadExcel, updateConfig, showAlert }) {
+export default function HistoryCenter ({ cfg, excel, reloadExcel, recordAfterWrite, notifyWritten, showAlert }) {
   const [expanded, setExpanded] = useState(null)
   const [confirmUndo, setConfirmUndo] = useState(null)
   const [editRec, setEditRec] = useState(null)
@@ -14,55 +15,53 @@ export default function HistoryCenter ({ cfg, excel, reloadExcel, updateConfig, 
   const statusMap = useMemo(() => computeStatusMap(history), [history])
   const ordered = useMemo(() => [...history].reverse(), [history])
 
-  const markUndone = async (record, extraMutate) => {
-    const saved = await updateConfig(c => {
-      const rec = c.history.find(r => r.batchId === record.batchId)
-      if (rec) rec.status = 'undone'
-      if (extraMutate) extraMutate(c)
-      return c
-    })
-    return !!saved
-  }
-
   const performUndo = async (record) => {
     setBusy(true)
     setConfirmUndo(null)
-    let res
     const deltas = record.details || {}
-    const neg = Object.fromEntries(Object.entries(deltas).map(([k, v]) => [k, round1(-v)]))
+    const neg = Object.fromEntries(Object.entries(deltas).map(([k, v]) => [k, round4(-v)]))
 
+    // 第一步：让主进程把表格改回去（写入前自动备份，写完后把全表 F 列汇总重算一遍）
+    let res
     if (record.type === 'event_create') {
-      // 撤销初次创建：F 反向扣减 + 物理删除活动列
-      res = await api.deleteActivityColumn(cfg.excelPath, { activityName: record.label, deltas })
+      // 撤销"新建活动"：整列删除，汇总随之重算；这一列新建前的列宽和格式照记录里存的样子恢复
+      res = await api.deleteActivityColumn(cfg.excelPath, { activityName: record.label, prevColumn: record.prevColumn })
     } else if (record.type === 'event_edit') {
-      // 撤销修改：反向差值扣减，恢复上一版本
+      // 撤销"修改活动"：按相反的差值写回
       res = await api.applyEventEdit(cfg.excelPath, { activityName: record.label, deltas: neg })
     } else {
-      // 考勤/部门：目标列与 F 列反向扣减
-      const targetCol = record.meta?.targetCol || (record.type === 'daily' ? 2 : record.type === 'flag' ? 3 : 4)
+      // 撤销考勤 / 部门导入：在原来写入的那一列做反向累加
+      const fallbackCol = record.type === 'daily' ? 2 : record.type === 'flag' ? 3 : record.meta?.department === 'comprehensive' ? 5 : 4
+      const targetCol = record.meta?.targetCol || fallbackCol
       res = await api.applyIncrement(cfg.excelPath, { targetCol, deltas: neg })
     }
-
     if (!res.ok) {
       setBusy(false)
       showAlert(res.error || '撤销写入失败')
       return
     }
 
-    const ok = await markUndone(record, c => {
+    // 第二步：在历史里把这一笔标记为"已撤销"（并解开对应的部门锁）；
+    // 万一保存失败，App 会用第一步留下的备份把 Excel 回滚
+    const saved = await recordAfterWrite(res, c => {
+      const rec = c.history.find(r => r.batchId === record.batchId)
+      if (rec) rec.status = 'undone'
       if (record.type === 'department' && record.meta?.department) {
         c.locks = c.locks || {}
         if (record.meta.department === 'logistics') c.locks.is_logistics_imported = false
         else c.locks.is_comprehensive_imported = false
       }
+      return c
     })
     setBusy(false)
-    if (ok) await reloadExcel()
+    if (!saved) return
+    await reloadExcel()
+    notifyWritten(res, `已撤销「${record.label}」，全表汇总分已重新计算`)
   }
 
   const statusBadge = (s) => {
     if (s === 'active') return <Badge tone="green">活跃</Badge>
-    if (s === 'locked') return <Badge tone="zinc">🔒 锁定</Badge>
+    if (s === 'locked') return <Badge tone="zinc"><IconLock className="w-3 h-3 mr-1" />锁定</Badge>
     return <Badge tone="red">已撤销</Badge>
   }
 
@@ -137,7 +136,7 @@ export default function HistoryCenter ({ cfg, excel, reloadExcel, updateConfig, 
                         <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
                           {Object.entries(rec.details || {}).map(([n, v]) => (
                             <span key={n} className={`text-[11px] px-2 py-1 rounded-md border font-mono ${v >= 0 ? 'border-emerald-500/20 bg-emerald-500/[0.07] text-emerald-300' : 'border-red-500/20 bg-red-500/[0.07] text-red-300'}`}>
-                              {n} {v >= 0 ? '+' : ''}{round1(v)}
+                              {n} {v >= 0 ? '+' : ''}{round4(v)}
                             </span>
                           ))}
                         </div>
@@ -158,7 +157,7 @@ export default function HistoryCenter ({ cfg, excel, reloadExcel, updateConfig, 
         danger
         confirmText="确认撤销"
         message={confirmUndo
-          ? `将执行反向数据回滚：${confirmUndo.type === 'event_create' ? `从 F 列扣除全部分值，并在 Excel 中物理删除「${confirmUndo.label}」整列（右侧列自动左移）。` : confirmUndo.type === 'event_edit' ? `在「${confirmUndo.label}」活动列与 F 列执行反向差值扣减，恢复到上一版本状态。` : `在对应列与 F 列反向扣除本批次全部分值。`}${confirmUndo.type === 'department' ? '同时释放对应部门的互斥锁，入口将重新点亮。' : ''} 撤销前会自动滚动备份 Excel。`
+          ? `将执行反向数据回滚：${confirmUndo.type === 'event_create' ? `在 Excel 中物理删除「${confirmUndo.label}」整列（右侧各列自动左移）。` : confirmUndo.type === 'event_edit' ? `在「${confirmUndo.label}」活动列按相反差值写回，恢复到上一版本。` : `在原来写入的那一列反向扣除本批次全部分值。`}${confirmUndo.type === 'department' ? '同时释放对应部门的互斥锁，入口将重新开放。' : ''}撤销后全表 F 列汇总会重新计算。撤销前会自动备份 Excel。`
           : ''}
         onCancel={() => setConfirmUndo(null)}
         onConfirm={() => performUndo(confirmUndo)}
@@ -174,9 +173,10 @@ export default function HistoryCenter ({ cfg, excel, reloadExcel, updateConfig, 
           busy={busy}
           setBusy={setBusy}
           showAlert={showAlert}
+          recordAfterWrite={recordAfterWrite}
+          notifyWritten={notifyWritten}
           onClose={() => setEditRec(null)}
           onDone={async () => { setEditRec(null); await reloadExcel() }}
-          updateConfig={updateConfig}
         />
       )}
     </div>
@@ -184,7 +184,7 @@ export default function HistoryCenter ({ cfg, excel, reloadExcel, updateConfig, 
 }
 
 // ---------- 操作 A：部分修改（差值运算 Delta Update） ----------
-function EditRecordModal ({ record, history, roster, duplicateNames, cfg, busy, setBusy, showAlert, onClose, onDone, updateConfig }) {
+function EditRecordModal ({ record, history, roster, duplicateNames, cfg, busy, setBusy, showAlert, recordAfterWrite, notifyWritten, onClose, onDone }) {
   // 自动加载该活动所有成员当时的积分情况（含历次修改累加）
   const baseScores = useMemo(() => currentScoresOf(history, record.objectKey), [history, record])
   const [values, setValues] = useState(() => Object.fromEntries(Object.entries(baseScores).map(([k, v]) => [k, v])))
@@ -197,7 +197,7 @@ function EditRecordModal ({ record, history, roster, duplicateNames, cfg, busy, 
 
   const addMember = () => {
     if (!addName || addName in values) return
-    setValues(v => ({ ...v, [addName]: round1(Number(addScore) || 0) }))
+    setValues(v => ({ ...v, [addName]: round4(Number(addScore) || 0) }))
     setAddName('')
   }
 
@@ -206,7 +206,7 @@ function EditRecordModal ({ record, history, roster, duplicateNames, cfg, busy, 
     // 差值 = 新分数 - 旧分数
     const deltas = {}
     for (const [name, val] of Object.entries(values)) {
-      const d = round1((Number(val) || 0) - (baseScores[name] || 0))
+      const d = round4((Number(val) || 0) - (baseScores[name] || 0))
       if (d !== 0) deltas[name] = d
     }
     if (!Object.keys(deltas).length) {
@@ -214,6 +214,7 @@ function EditRecordModal ({ record, history, roster, duplicateNames, cfg, busy, 
       showAlert('没有检测到任何分数变动', '无变动')
       return
     }
+    // 第一步：主进程把差值写进活动列（写入前自动备份，写完后把全表 F 列汇总重算一遍）
     const res = await api.applyEventEdit(cfg.excelPath, { activityName: record.label, deltas })
     if (!res.ok) {
       setBusy(false)
@@ -233,15 +234,18 @@ function EditRecordModal ({ record, history, roster, duplicateNames, cfg, busy, 
         baseBatchId: record.batchId
       }
     }
-    const saved = await updateConfig(c => { c.history.push(editRecord); return c })
+    // 第二步：作为一条新的修改记录登记到历史；万一登记失败，App 会用第一步的备份回滚 Excel
+    const saved = await recordAfterWrite(res, c => { c.history.push(editRecord); return c })
     setBusy(false)
-    if (saved) onDone()
+    if (!saved) return
+    notifyWritten(res, `已修改「${record.label}」：${Object.keys(deltas).length} 人的分数有变动，全表汇总分已重新计算`)
+    onDone()
   }
 
   return (
     <Modal open onClose={busy ? undefined : onClose} title={`部分修改 · ${record.label}`} width="max-w-2xl" dismissable={!busy}>
       <div className="text-xs text-zinc-500 mb-4 leading-relaxed">
-        已加载该活动所有成员当时的积分情况。直接修改分数后提交，程序将按「差值 = 新分数 − 旧分数」在 Excel 活动列与 F 列增量累加，并作为一条全新的修改记录追加到历史（原记录即刻锁定）。
+        已加载该活动所有成员当前的分数。直接修改后提交，程序按「差值 = 新分数 − 旧分数」写入 Excel 的活动列，并把这一笔记为一条新的修改记录（原记录随即锁定）。
       </div>
       <div className="rounded-xl border border-white/[0.08] overflow-hidden max-h-[42vh] overflow-y-auto">
         <table className="w-full border-collapse">
@@ -257,14 +261,14 @@ function EditRecordModal ({ record, history, roster, duplicateNames, cfg, busy, 
             {Object.keys(values).sort().map(name => {
               const oldV = baseScores[name] || 0
               const newV = Number(values[name]) || 0
-              const d = round1(newV - oldV)
+              const d = round4(newV - oldV)
               return (
                 <tr key={name} className="border-b border-white/[0.04]">
                   <td className="td">
                     {name}
                     {dupSet.has(name) && <span className="ml-2"><Badge tone="amber">同名待核对</Badge></span>}
                   </td>
-                  <td className="td text-right font-mono text-zinc-400">{round1(oldV)}</td>
+                  <td className="td text-right font-mono text-zinc-400">{round4(oldV)}</td>
                   <td className="td text-right">
                     <input
                       type="number" step="0.5" className="input !py-1 !text-right font-mono w-24 ml-auto"

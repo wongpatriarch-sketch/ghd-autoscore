@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react'
+import { IconAlert, IconCheck } from './icons.jsx'
 
 export function Modal ({ open, onClose, title, children, width = 'max-w-2xl', dismissable = true }) {
   useEffect(() => {
@@ -35,7 +36,9 @@ export function AlertModal ({ open, title = '操作被阻断', message, onClose 
   return (
     <Modal open={open} onClose={onClose} title={title} width="max-w-md" dismissable>
       <div className="flex gap-3">
-        <div className="w-10 h-10 shrink-0 rounded-full bg-red-500/15 border border-red-500/30 flex items-center justify-center text-red-400 text-lg">!</div>
+        <div className="w-10 h-10 shrink-0 rounded-full bg-red-500/15 border border-red-500/30 flex items-center justify-center text-red-400">
+          <IconAlert className="w-5 h-5" />
+        </div>
         <p className="text-sm text-zinc-300 leading-relaxed pt-2">{message}</p>
       </div>
       <div className="mt-5 flex justify-end">
@@ -66,7 +69,8 @@ export function Badge ({ tone = 'zinc', children }) {
     blue: 'bg-sky-500/15 border-sky-500/30 text-sky-300'
   }
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded-md border text-[11px] font-medium ${tones[tone]}`}>
+    // whitespace-nowrap：徽标里的字不许折行（姓名列较窄时"同名待核对"曾被挤成两行，把整行撑高）
+    <span className={`inline-flex items-center whitespace-nowrap px-2 py-0.5 rounded-md border text-[11px] font-medium ${tones[tone]}`}>
       {children}
     </span>
   )
@@ -83,6 +87,27 @@ export function Spinner ({ text = '处理中…' }) {
     <div className="flex items-center gap-3 text-sm text-zinc-400">
       <span className="w-4 h-4 border-2 border-accent/30 border-t-accent rounded-full animate-spin" />
       {text}
+    </div>
+  )
+}
+
+// 右上角的非阻断提示：写入成功、自动纠正了哪些行等。几秒后自动消失，不打断当前操作。
+// tone: 'ok' 普通成功 | 'warn' 成功但有需要知道的情况（例如原汇总被纠正）
+export function Toasts ({ items }) {
+  if (!items || !items.length) return null
+  return (
+    <div className="fixed top-16 right-6 z-40 flex flex-col gap-2 w-[380px] max-w-[calc(100vw-3rem)]">
+      {items.map(t => (
+        <div
+          key={t.id}
+          className={`glass-strong rounded-xl px-4 py-3 flex gap-2.5 ${t.tone === 'warn' ? 'border-amber-500/40' : 'border-emerald-500/30'}`}
+        >
+          <span className={`shrink-0 mt-0.5 ${t.tone === 'warn' ? 'text-amber-300' : 'text-emerald-300'}`}>
+            {t.tone === 'warn' ? <IconAlert className="w-4 h-4" /> : <IconCheck className="w-4 h-4" />}
+          </span>
+          <span className="text-xs leading-relaxed text-zinc-200">{t.message}</span>
+        </div>
+      ))}
     </div>
   )
 }

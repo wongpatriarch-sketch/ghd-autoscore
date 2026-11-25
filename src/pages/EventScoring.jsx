@@ -1,13 +1,13 @@
 import React, { useMemo, useState } from 'react'
 import { Modal, Badge } from '../components/ui.jsx'
-import { parseNames, makeBatchId, round1 } from '../lib/utils.js'
+import { parseNames, makeBatchId, round4 } from '../lib/utils.js'
 import { api } from '../lib/api.js'
 
 const HOURS_OPTIONS = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
 let cardSeq = 1
 const newCard = () => ({ id: cardSeq++, hours: 1.0, coaches: '', participants: '' })
 
-export default function EventScoring ({ cfg, excel, reloadExcel, updateConfig, showAlert }) {
+export default function EventScoring ({ cfg, excel, reloadExcel, recordAfterWrite, notifyWritten, showAlert }) {
   const [activityName, setActivityName] = useState('')
   const [headCoaches, setHeadCoaches] = useState('')
   const [trainings, setTrainings] = useState([])
@@ -40,17 +40,17 @@ export default function EventScoring ({ cfg, excel, reloadExcel, updateConfig, s
 
   const validate = () => {
     setFormError('')
-    const trimmed = activityName.trim()
-    if (!trimmed) return '请填写活动名称（将作为 Excel 新列表头）'
-    if (excel?.headers?.slice(0, 6)?.includes(trimmed)) {
-      return `「${trimmed}」与主表前 6 列固定列名冲突，不能用作活动名称`
-    }
+    const name = activityName.trim()
+    if (!name) return '请填写活动名称（将作为 Excel 新列表头）'
     const heads = parseNames(headCoaches)
     if (heads.length < 1 || heads.length > 5) return '主教官需填写 1~5 位人名，不能为空'
     if (trainings.some(t => !parseNames(t.coaches).length && !parseNames(t.participants).length)) return '存在完全空的训练卡片，请补充名单或删除该卡片'
     if (rehearsals.some(r => !parseNames(r.coaches).length && !parseNames(r.participants).length)) return '存在完全空的彩排卡片，请补充名单或删除该卡片'
     if (!parseNames(formal.participants).length) return '正式活动「参加」名单不能为空'
-    if (excel?.activityColumns?.some(c => c.name === trimmed)) return `主表中已存在同名活动列「${trimmed}」，请更换活动名称`
+    if (excel?.activityColumns?.some(c => c.name === name)) return `主表中已存在同名活动列「${name}」，请更换活动名称`
+    // 表格里任何一列都不能叫这个名字：和「姓名」「汇总」这些固定列重名的话，这一列在表里就分不清了。
+    // 主进程写入时也会拦，这里提前说出来，不用等到预览之后才被挡回去
+    if ((excel?.headers || []).some(h => String(h || '').trim() === name)) return `主表里已经有一列叫「${name}」，活动名称不能和它相同，请换一个`
     return ''
   }
 
@@ -66,7 +66,7 @@ export default function EventScoring ({ cfg, excel, reloadExcel, updateConfig, s
       const name = resolve(rawName)
       if (!name) return
       if (!parts[name]) parts[name] = { head: 0, training: 0, rehearsal: 0, formal: 0, stage: 0 }
-      parts[name][key] = round1(parts[name][key] + val)
+      parts[name][key] = round4(parts[name][key] + val)
     }
     parseNames(headCoaches).forEach(n => add(n, 'head', 2.0))
     trainings.forEach(t => {
@@ -81,7 +81,7 @@ export default function EventScoring ({ cfg, excel, reloadExcel, updateConfig, s
     parseNames(formal.stageCrew).forEach(n => add(n, 'stage', 0.5))
 
     const rows = Object.entries(parts).map(([name, p]) => {
-      const total = round1(p.head + p.training + p.rehearsal + p.formal + p.stage)
+      const total = round4(p.head + p.training + p.rehearsal + p.formal + p.stage)
       return { name, ...p, total, duplicate: dupSet.has(name) }
     }).sort((a, b) => b.total - a.total)
     const scores = {}
@@ -115,8 +115,12 @@ export default function EventScoring ({ cfg, excel, reloadExcel, updateConfig, s
   }
 
   const onCommit = async () => {
+    // 没有任何人得分时（名单里的人全被忽略了）按钮是灰的；这里再拦一道，这种空活动不交给主进程
+    if (!preview || !preview.rows.length) return
+    const name = activityName.trim()
     setBusy(true)
-    const res = await api.commitEvent(cfg.excelPath, { activityName: activityName.trim(), scores: preview.scores })
+    // 第一步：主进程写入 Excel（写入前自动备份，写完后把全表 F 列汇总重算一遍）
+    const res = await api.commitEvent(cfg.excelPath, { activityName: name, scores: preview.scores })
     if (!res.ok) {
       setBusy(false)
       showAlert(res.error || '写入失败')
@@ -126,8 +130,8 @@ export default function EventScoring ({ cfg, excel, reloadExcel, updateConfig, s
       batchId: makeBatchId(),
       timestamp: new Date().toISOString(),
       type: 'event_create',
-      objectKey: `event::${activityName.trim()}`,
-      label: activityName.trim(),
+      objectKey: `event::${name}`,
+      label: name,
       details: preview.scores,
       meta: {
         source: '活动积分结算引擎',
@@ -138,10 +142,15 @@ export default function EventScoring ({ cfg, excel, reloadExcel, updateConfig, s
         memberCount: Object.keys(preview.scores).length
       }
     }
-    const saved = await updateConfig(c => { c.history.push(record); return c })
+    // 新列占用的那一列，新建前如果已经带着列宽、边框等格式，主进程会把它的原样返回；
+    // 存进历史记录，之后"撤销新建"时带回去，表格才能恢复成新建前的样子
+    if (res.data.prevColumn) record.prevColumn = res.data.prevColumn
+    // 第二步：把这一笔登记到项目历史；万一登记失败，App 会用刚才的备份把 Excel 回滚
+    const saved = await recordAfterWrite(res, c => { c.history.push(record); return c })
     setBusy(false)
     if (!saved) return
     await reloadExcel()
+    notifyWritten(res, `已追加活动列「${name}」（主表第 ${res.data.column} 列），全表汇总分已重新计算`)
     setPreview(null)
     setActivityName(''); setHeadCoaches('')
     setTrainings([]); setRehearsals([newCard()])
@@ -286,43 +295,54 @@ export default function EventScoring ({ cfg, excel, reloadExcel, updateConfig, s
       {/* 预览确认 */}
       {preview && (
         <Modal open onClose={busy ? undefined : () => setPreview(null)} title={`结算预览 · ${activityName.trim()}`} width="max-w-3xl" dismissable={!busy}>
-          <div className="text-xs text-zinc-500 mb-3">
-            共 {preview.rows.length} 人。确认后将在主表最右侧追加「{activityName.trim()}」列，并同步 F 列汇总（写入前自动滚动备份）。
-          </div>
-          <div className="rounded-xl border border-white/[0.08] overflow-hidden max-h-[46vh] overflow-y-auto">
-            <table className="w-full border-collapse">
-              <thead className="sticky top-0 bg-surface-800">
-                <tr className="border-b border-white/[0.08]">
-                  <th className="th">姓名</th>
-                  <th className="th text-right">主教官</th>
-                  <th className="th text-right">训练</th>
-                  <th className="th text-right">彩排</th>
-                  <th className="th text-right">正式</th>
-                  <th className="th text-right">场务</th>
-                  <th className="th text-right">合计</th>
-                </tr>
-              </thead>
-              <tbody>
-                {preview.rows.map(r => (
-                  <tr key={r.name} className="border-b border-white/[0.04]">
-                    <td className="td">
-                      {r.name}
-                      {r.duplicate && <span className="ml-2"><Badge tone="amber">同名待核对</Badge></span>}
-                    </td>
-                    <td className="td text-right font-mono text-zinc-400">{r.head || '—'}</td>
-                    <td className="td text-right font-mono text-zinc-400">{r.training || '—'}</td>
-                    <td className="td text-right font-mono text-zinc-400">{r.rehearsal || '—'}</td>
-                    <td className="td text-right font-mono text-zinc-400">{r.formal || '—'}</td>
-                    <td className="td text-right font-mono text-zinc-400">{r.stage || '—'}</td>
-                    <td className="td text-right font-mono font-bold text-zinc-50">+{r.total}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          {preview.rows.length === 0
+            // 没有任何人得分（名单里的名字全选了「忽略」）：不显示空表格，直接说明原因；「确认写入」按钮是灰的
+            ? (
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-300 leading-relaxed">
+                ⚠ 共 0 人得分：名单里的名字都选了「忽略」，没有任何队员得分，这一笔不会写入主表。请点「返回修改」检查名单。
+              </div>
+              )
+            : (
+              <>
+                <div className="text-xs text-zinc-500 mb-3">
+                  共 {preview.rows.length} 人。确认后会在主表最右侧追加「{activityName.trim()}」列（第 7 列的空白分隔列不会被占用），并把全表 F 列汇总重新计算一遍；写入前会自动备份原表格。
+                </div>
+                <div className="rounded-xl border border-white/[0.08] overflow-hidden max-h-[46vh] overflow-y-auto">
+                  <table className="w-full border-collapse">
+                    <thead className="sticky top-0 bg-surface-800">
+                      <tr className="border-b border-white/[0.08]">
+                        <th className="th">姓名</th>
+                        <th className="th text-right">主教官</th>
+                        <th className="th text-right">训练</th>
+                        <th className="th text-right">彩排</th>
+                        <th className="th text-right">正式</th>
+                        <th className="th text-right">场务</th>
+                        <th className="th text-right">合计</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {preview.rows.map(r => (
+                        <tr key={r.name} className="border-b border-white/[0.04]">
+                          <td className="td">
+                            {r.name}
+                            {r.duplicate && <span className="ml-2"><Badge tone="amber">同名待核对</Badge></span>}
+                          </td>
+                          <td className="td text-right font-mono text-zinc-400">{r.head || '—'}</td>
+                          <td className="td text-right font-mono text-zinc-400">{r.training || '—'}</td>
+                          <td className="td text-right font-mono text-zinc-400">{r.rehearsal || '—'}</td>
+                          <td className="td text-right font-mono text-zinc-400">{r.formal || '—'}</td>
+                          <td className="td text-right font-mono text-zinc-400">{r.stage || '—'}</td>
+                          <td className="td text-right font-mono font-bold text-zinc-50">+{r.total}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+              )}
           <div className="mt-5 flex justify-end gap-3">
             <button className="btn-ghost" onClick={() => setPreview(null)} disabled={busy}>返回修改</button>
-            <button className="btn-primary" onClick={onCommit} disabled={busy}>{busy ? '写入中…' : '确认写入 Excel'}</button>
+            <button className="btn-primary" onClick={onCommit} disabled={busy || !preview.rows.length}>{busy ? '写入中…' : '确认写入 Excel'}</button>
           </div>
         </Modal>
       )}

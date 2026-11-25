@@ -22,12 +22,11 @@ export const api = {
   openProject: (p) => invoke('project:open', p),
   saveProject: (p, cfg) => invoke('project:save', p, cfg),
   closeProject: (excelPath) => invoke('project:close', excelPath),
-  checkLock: (excelPath) => invoke('lock:check', excelPath),
   readExcel: (p) => invoke('excel:read', p),
-  createTemplate: (p) => invoke('excel:createTemplate', p),
   commitEvent: (p, payload) => invoke('excel:commitEvent', p, payload),
   applyIncrement: (p, payload) => invoke('excel:applyIncrement', p, payload),
   applyEventEdit: (p, payload) => invoke('excel:applyEventEdit', p, payload),
   deleteActivityColumn: (p, payload) => invoke('excel:deleteActivityColumn', p, payload),
+  restoreBackup: (p, backupPath) => invoke('excel:restoreBackup', p, backupPath),
   readExternal: (p, mode) => invoke('excel:readExternal', p, mode)
 }

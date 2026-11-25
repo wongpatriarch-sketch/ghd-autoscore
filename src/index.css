@@ -59,6 +59,8 @@ body {
 }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
+/* 横向、纵向两条滚动条交汇的那一小块（表格右下角）不单独上色的话会是一块白色 */
+::-webkit-scrollbar-corner { background: transparent; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
   background: rgba(255,255,255,0.12);

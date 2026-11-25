@@ -35,9 +35,3 @@ export const TYPE_LABELS = {
   flag: '升降旗',
   department: '部门积分'
 }
-
-export const STATUS_LABELS = {
-  active: '活跃',
-  locked: '锁定',
-  undone: '已撤销'
-}
