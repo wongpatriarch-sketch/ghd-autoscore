@@ -3,23 +3,24 @@
   "productName": "国护积分管理",
   "version": "1.0.1",
   "description": "国旗护卫队单机版积分管理与统计工具",
-  "main": "electron/main.js",
+  "author": "国旗护卫队",
+  "main": "dist-electron/main.js",
   "private": true,
   "scripts": {
-    "dev": "concurrently -k \"vite\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
+    "dev": "concurrently -k \"vite\" \"node scripts/build-electron.cjs --watch\" \"wait-on tcp:5173 file:dist-electron/main.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
     "dev:renderer": "vite",
     "build": "vite build",
-    "start": "npm run build && electron .",
-    "dist": "npm run build && electron-builder",
+    "build:electron": "node scripts/build-electron.cjs",
+    "start": "npm run build && npm run build:electron && electron .",
+    "dist": "npm run build && npm run build:electron && electron-builder",
+    "verify:packaged": "node scripts/verify-packaged.cjs",
+    "test:e2e": "npm run build && npm run build:electron && node scripts/e2e-smoke.cjs dev && node scripts/e2e-scenarios.cjs dev",
+    "test:e2e:packaged": "node scripts/e2e-smoke.cjs packaged && node scripts/e2e-scenarios.cjs packaged",
     "test:services": "node tests/services.test.cjs",
     "test:project": "node tests/project.test.cjs",
-    "test": "npm run test:services && npm run test:project && npm run test:render",
+    "test:stress": "node tests/stress.test.cjs",
+    "test": "npm run test:services && npm run test:project && npm run test:stress && npm run test:render",
     "test:render": "node tests/render.test.cjs"
-  },
-  "dependencies": {
-    "call-bind-apply-helpers": "^1.0.2",
-    "dunder-proto": "^1.0.1",
-    "exceljs": "^4.4.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
@@ -28,6 +29,8 @@
     "cross-env": "^7.0.3",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8",
+    "esbuild": "^0.21.5",
+    "exceljs": "^4.4.0",
     "postcss": "^8.4.49",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -38,21 +41,16 @@
   "build": {
     "appId": "com.ghd.autoscore",
     "productName": "国护积分管理",
+    "directories": {
+      "output": "release"
+    },
     "files": [
-      "dist/index.html",
-      "dist/assets/**/*",
-      "electron/**/*",
-      "node_modules/call-bind-apply-helpers/**/*"
+      "dist/**/*",
+      "dist-electron/**/*"
     ],
     "win": {
-      "target": "nsis"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "国护积分管理"
+      "target": "nsis",
+      "icon": "build/icon.png"
     },
     "mac": {
       "target": "dmg"
