@@ -871,6 +871,166 @@ const row = (r, ...cells) => `<row r="${r}">${cells.join('')}</row>`
     assert(/^<f t="shared" si="\d+"\/><v>0<\/v>$/.test(b4), `共享公式其余格应保留编号和已保存结果 0，实际：${b4}`)
   })
 
+  // ---------- 合计行、公式格、替换文件时的重试 ----------
+  const HEADER_ROW = row(1, ...HEADERS.map((h, i) => sCell(`${'ABCDEF'[i]}1`, h)))
+
+  await t('「合计」「备注」这类文字行不是队员：不进名单、不能被写入、汇总格原样保留', async () => {
+    const p = path.join(tmp, '带合计行.xlsx')
+    await writeRawXlsx(p, [
+      HEADER_ROW,
+      row(2, sCell('A2', '甲'), nCell('B2', 1), nCell('C2', 2), nCell('F2', 3)),
+      row(3, sCell('A3', '乙'), nCell('B3', 1), nCell('C3', 0), nCell('F3', 1)),
+      row(4, sCell('A4', '合计'), '<c r="F4"><f>SUM(F2:F3)</f><v>4</v></c>'), // 汇总格是公式的合计行
+      row(5, sCell('A5', '备注：10 月起按新标准'), nCell('F5', 9)), // 备注行，汇总格里碰巧有个数
+      row(6, sCell('A6', '姓 名'), sCell('B6', '夜训周训'), sCell('F6', '汇总')), // 中间又出现一次表头
+      row(7, sCell('A7', '小 计'), nCell('F7', 100)) // 字中间带排版空格的小计行
+    ])
+    const rd = await excelService.readWorkbook(p)
+    assert(rd.ok, rd.error)
+    assert.deepStrictEqual(rd.data.members.map(m => m.name), ['甲', '乙'], '合计、备注、重复的表头都不应进名单')
+    assert.deepStrictEqual(rd.data.labelRows.map(x => [x.row, x.name]), [[4, '合计'], [5, '备注：10 月起按新标准'], [6, '姓 名'], [7, '小 计']])
+
+    const r = await excelService.applyIncrement(p, { targetCol: 2, deltas: { 甲: 1 } })
+    assert(r.ok, r.error)
+    assert.deepStrictEqual(r.data.summaryFixed, [], '文字行不应被报告成"原汇总与明细对不上"')
+    assert.deepStrictEqual(r.data.untouchedRows, [])
+    assert.strictEqual(await rawCell(p, 'F4'), '<f>SUM(F2:F3)</f><v>4</v>', '合计行的公式和结果应原样保留')
+    assert.strictEqual(await cell(p, 5, 6), 9)
+    assert.strictEqual(await cell(p, 6, 6), '汇总')
+    assert.strictEqual(await cell(p, 7, 6), 100)
+    assert.strictEqual(await cell(p, 2, 6), 4, '队员行照常重算')
+
+    // 名单里出现「合计」时不能把分写到那一行：它不是队员
+    const w = await excelService.applyIncrement(p, { targetCol: 2, deltas: { 合计: 1 } })
+    assert(!w.ok && w.code === 'MEMBER_MISSING', JSON.stringify(w))
+  })
+
+  await t('明细里没有任何分数、汇总格却是"算出了数值"的公式：多半是合计行，不改动并如实报告', async () => {
+    const p = path.join(tmp, '无名单计行.xlsx')
+    await writeRawXlsx(p, [
+      HEADER_ROW,
+      row(2, sCell('A2', '甲'), nCell('B2', 1), nCell('F2', 1)),
+      row(3, sCell('A3', '全体'), '<c r="F3"><f>SUM(F2:F2)</f><v>1</v></c>'),
+      // 对照：队员的汇总格是公式、算出来是 0，明细也是空的——这是正常的"还没有分数的队员"，照常处理
+      row(4, sCell('A4', '乙'), '<c r="F4"><f>SUM(B4:E4)</f><v>0</v></c>')
+    ])
+    const r = await excelService.applyIncrement(p, { targetCol: 2, deltas: { 甲: 1 } })
+    assert(r.ok, r.error)
+    assert.deepStrictEqual(r.data.untouchedRows, [{ name: '全体', row: 3, summary: 1 }])
+    assert.deepStrictEqual(r.data.summaryFixed, [])
+    assert.strictEqual(await rawCell(p, 'F3'), '<f>SUM(F2:F2)</f><v>1</v>')
+    assert.strictEqual(await cell(p, 2, 6), 2)
+    assert.strictEqual(await rawCell(p, 'F4'), '<f>SUM(B4:E4)</f><v>0</v>', '算出来是 0 的空队员不应被当成合计行')
+  })
+
+  await t('要累加的格子是公式时拒绝写入（公式不会被换成数字），表格一个字节都不动', async () => {
+    const p = path.join(tmp, '公式格主表.xlsx')
+    await writeRawXlsx(p, [
+      row(1, ...HEADERS.map((h, i) => sCell(`${'ABCDEF'[i]}1`, h)), sCell('H1', '国庆出旗')),
+      row(2, sCell('A2', '甲'), '<c r="C2"><f>SUM(1,2)</f><v>3</v></c>', nCell('F2', 3)),
+      row(3, sCell('A3', '乙'), nCell('C3', 1), '<c r="H3"><f>SUM(1,2)</f><v>3</v></c>', nCell('F3', 4))
+    ])
+    const before = snapshot(p)
+    const backupCount = backups().length
+
+    const r = await excelService.applyIncrement(p, { targetCol: 3, deltas: { 甲: 1, 乙: 1 } })
+    assert(!r.ok && r.code === 'FORMULA_CELL', JSON.stringify(r))
+    assert.deepStrictEqual(r.data.formulaCells, ['甲'], '乙的升降旗格是数字，不应被牵连')
+    assert(/升降旗/.test(r.error) && /甲/.test(r.error) && /选择性粘贴/.test(r.error), r.error)
+
+    const e = await excelService.applyEventEdit(p, { activityName: '国庆出旗', deltas: { 乙: 1 } })
+    assert(!e.ok && e.code === 'FORMULA_CELL', JSON.stringify(e))
+    assert(/国庆出旗/.test(e.error) && /乙/.test(e.error), e.error)
+
+    assert.strictEqual(snapshot(p), before, '表格不应有任何改动')
+    assert.strictEqual(backups().length, backupCount, '校验没通过时不应产生备份')
+
+    // 别的格子照常可写：把差值加到甲的 B 列（数字格）
+    const ok = await excelService.applyIncrement(p, { targetCol: 2, deltas: { 甲: 1 } })
+    assert(ok.ok, ok.error)
+    assert.strictEqual(await cell(p, 2, 2), 1)
+    assert.strictEqual(await cell(p, 2, 6), 4)
+    assert.strictEqual(await rawCell(p, 'C2'), '<f>SUM(1,2)</f><v>3</v>', '没有被改到的公式不受影响')
+  })
+
+  await t('替换文件时被"一闪而过"地占用（EPERM）：稍等重试后照常写成功', async () => {
+    const p = path.join(tmp, '重试主表.xlsx')
+    await writeRawXlsx(p, [HEADER_ROW, row(2, sCell('A2', '甲'), nCell('B2', 1), nCell('F2', 1))])
+    const realRename = fs.renameSync
+    let fails = 2
+    fs.renameSync = (a, b) => {
+      if (fails > 0) { fails--; throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' }) }
+      return realRename(a, b)
+    }
+    try {
+      const r = await excelService.applyIncrement(p, { targetCol: 2, deltas: { 甲: 1 } })
+      assert(r.ok, r.error)
+      assert.strictEqual(fails, 0, '应当重试到成功为止')
+      assert.strictEqual(await cell(p, 2, 2), 2)
+    } finally {
+      fs.renameSync = realRename
+    }
+    assert.deepStrictEqual(fs.readdirSync(tmp).filter(f => f.startsWith('重试主表.xlsx.tmp-')), [])
+  })
+
+  await t('表格一直被占用时：重试几次后放弃，报"被占用"，不留下临时文件，原表格完好', async () => {
+    const realRename = fs.renameSync
+    const before = snapshot(mainXlsx)
+    let calls = 0
+    fs.renameSync = () => { calls++; throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' }) }
+    try {
+      const r = await excelService.applyIncrement(mainXlsx, { targetCol: 2, deltas: { 张三: 1 } })
+      assert(!r.ok && r.code === 'EPERM', JSON.stringify(r))
+      assert(/被其他程序占用/.test(r.error), r.error)
+      assert(calls >= 3, `应当重试多次，实际调用了 ${calls} 次`)
+    } finally {
+      fs.renameSync = realRename
+    }
+    assert.strictEqual(snapshot(mainXlsx), before, '写不进去时原表格应保持原样')
+    assert.deepStrictEqual(fs.readdirSync(tmp).filter(f => f.startsWith('总积分.xlsx.tmp-')), [])
+  })
+
+  await t('恢复备份先拷成临时文件再替换：拷到一半失败时主表保持原样', async () => {
+    const p = path.join(tmp, '回滚主表.xlsx')
+    await writeRawXlsx(p, [HEADER_ROW, row(2, sCell('A2', '甲'), nCell('B2', 1), nCell('F2', 1))])
+    const written = await excelService.applyIncrement(p, { targetCol: 2, deltas: { 甲: 1 } })
+    assert(written.ok, written.error)
+    const afterWrite = snapshot(p)
+    const realCopy = fs.copyFileSync
+    fs.copyFileSync = (src, dest) => {
+      fs.writeFileSync(dest, 'PK\u0003\u0004只拷了一半')
+      throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' })
+    }
+    try {
+      const r = await excelService.restoreBackup(p, written.data.backup)
+      assert(!r.ok && r.code === 'ENOSPC', JSON.stringify(r))
+    } finally {
+      fs.copyFileSync = realCopy
+    }
+    assert.strictEqual(snapshot(p), afterWrite, '主表不应被换成半截文件')
+    assert.deepStrictEqual(fs.readdirSync(tmp).filter(f => f.startsWith('回滚主表.xlsx.restore-')), [], '不应留下临时文件')
+    // 占用解除后用同一份备份恢复：成功，表格回到写入前
+    const ok = await excelService.restoreBackup(p, written.data.backup)
+    assert(ok.ok, ok.error)
+    assert.strictEqual(await cell(p, 2, 2), 1)
+    assert.strictEqual(await cell(p, 2, 6), 1)
+  })
+
+  await t('备份清理只认本表的备份：文件名以本表名结尾的另一个表不会被混进来', () => {
+    const dir = fs.mkdtempSync(path.join(tmp, '多表-'))
+    const a = path.join(dir, '积分.xlsx')
+    const b = path.join(dir, '总_积分.xlsx')
+    fs.writeFileSync(a, 'a')
+    fs.writeFileSync(b, 'b')
+    for (let i = 0; i < 5; i++) backupExcel(a) // 先给「积分.xlsx」备份 5 份
+    for (let i = 0; i < 18; i++) backupExcel(b) // 再给「总_积分.xlsx」备份 18 份（它的备份也以 _积分.xlsx 结尾）
+    const names = fs.readdirSync(path.join(dir, '.backups'))
+    const ofA = names.filter(f => /^\d{8}_\d{6}(_\d+)?_积分\.xlsx$/.test(f))
+    const ofB = names.filter(f => f.endsWith('_总_积分.xlsx'))
+    assert.strictEqual(ofA.length, 5, `「积分.xlsx」的 5 份备份应全部保留，实际 ${ofA.length}`)
+    assert.strictEqual(ofB.length, 18)
+  })
+
   // ---------- 其他 ----------
   await t('滚动备份 .backups 生成，且每个表格各自不超过 20 份', async () => {
     const files = backups()

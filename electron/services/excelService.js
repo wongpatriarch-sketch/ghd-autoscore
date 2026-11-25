@@ -4,6 +4,7 @@ require('./exceljsColumnWidth') // 修正 ExcelJS 写回时丢失"列宽 = 9"的
 const ExcelJS = require('exceljs')
 const { ValueType } = ExcelJS
 const { backupExcel } = require('./backupService')
+const { replaceFile } = require('./replaceFile')
 const lockService = require('./lockService')
 
 // ---------- 主表列契约（与真实总积分表一致）----------
@@ -17,6 +18,14 @@ const INCREMENT_COLS = [2, 3, 4, 5] // 只有 B/C/D/E 四列允许做增量累�
 // 届数前后也允许带空白和一个"第"字：有的表里写成「—— 29 届 ——」「--第26届--」。
 // 认不出届别行的后果是它被当成一个"队员"，所以这里宁可放宽一些（队员名字不会长成这样）
 const COHORT_RE = /^[-—–]{2,}\s*第?\s*(\d+)\s*届\s*[-—–]{2,}$/
+// 不是队员的"文字行"：A 列写着「合计」「小计」「备注」这类字样（字中间带不带空格都算），或者又是一个「姓名」表头。
+// 这样的行不是队员，它的汇总格里往往是全表的合计数（通常是公式）。当成队员的话，下一次重算汇总就会把它改成 0。
+// 队员的名字里不会出现这些词
+const LABEL_ROW_RE = /合计|小计|总计|平均|累计|备注|说明/
+function isLabelRowName (name) {
+  const compact = String(name || '').replace(/\s+/g, '')
+  return compact === '姓名' || LABEL_ROW_RE.test(compact)
+}
 // 带排版空格的姓名：为了和三字名对齐，有的名单把两字名写成「张 三」。
 // 整格都是"单个汉字 + 空白"时，它是一个名字而不是几个名字，读出来时把空白去掉
 const SPACED_NAME_RE = /^\p{Script=Han}(?:\s+\p{Script=Han})+$/u
@@ -144,12 +153,14 @@ async function getSheet (wb) {
   return ws
 }
 
-// 原子写回：先写临时文件再替换，失败时清理临时文件并返回错误码
+// 原子写回：先写临时文件再替换，失败时清理临时文件并返回错误码。
+// 替换这一步带着重试（见 replaceFile 的说明），避免被杀毒软件、搜索索引这类"一闪而过"的占用打断
 async function atomicWrite (wb, excelPath) {
   const tmp = `${excelPath}.tmp-${process.pid}-${Date.now()}`
   try {
     await wb.xlsx.writeFile(tmp)
-    fs.renameSync(tmp, excelPath)
+    const err = await replaceFile(tmp, excelPath)
+    if (err) throw err
     return { ok: true }
   } catch (e) {
     try { fs.unlinkSync(tmp) } catch (_) {}
@@ -182,13 +193,15 @@ function describeIoError (e) {
   return msg
 }
 
-// 写入前的占用检查：文件不存在，或被 Excel/WPS 等其他程序占用时拒绝
+// 写入前的占用检查：文件不存在，或者表格正被别的程序占用 / 是只读的时拒绝
 function guardBusy (excelPath, action = '写入') {
   if (!fileExists(excelPath)) return { ok: false, code: 'NOT_FOUND', error: '目标 Excel 文件不存在' }
-  if (lockService.isFileBusy(excelPath)) {
-    return { ok: false, code: 'EBUSY', error: `${action}失败：Excel 文件正被其他程序占用，请关闭该表格后重试` }
+  const probe = lockService.probeWritable(excelPath)
+  if (probe.ok) return { ok: true }
+  if (probe.reason === 'readonly') {
+    return { ok: false, code: 'EREADONLY', error: `${action}失败：这张表格是只读的（文件属性里勾选了"只读"，或者当前账号没有写入权限），请先取消只读后再试` }
   }
-  return { ok: true }
+  return { ok: false, code: 'EBUSY', error: `${action}失败：Excel 文件正被其他程序占用，请关闭该表格后重试` }
 }
 
 // 表格实际用到的最后一列的列号。
@@ -228,13 +241,13 @@ function copyStyle (src, dst) {
   }
 }
 
-// 按姓名定位行号（精确匹配；届别行不参与；同名时只取第一行）
+// 按姓名定位行号（精确匹配；届别行、「合计」这类文字行不参与；同名时只取第一行）
 function buildRowMap (ws) {
   const map = new Map()
   const dups = new Set()
   for (let r = 2; r <= ws.rowCount; r++) {
     const a = textIn(ws.getRow(r), NAME_COL)
-    if (!a || COHORT_RE.test(a)) continue
+    if (!a || COHORT_RE.test(a) || isLabelRowName(a)) continue
     if (map.has(a)) dups.add(a)
     else map.set(a, r)
   }
@@ -254,6 +267,7 @@ function findActivityCol (ws, activityName) {
 // 加完正好是 0 时写成空白，而不是 0：表里没有分数的格子本来就是空白（只有边框），
 // 撤销或更正一笔分数后，格子应当回到这种样子，而不是凭空留下一个 0。
 // 汇总列（F）不走这里，它始终写成数字。
+// 走到这里的格子一定不是公式：目标格是公式时，写入前的校验（formulaCellsIn）就已经拒绝了
 function addToCell (row, col, delta) {
   const cell = row.getCell(col)
   const cur = cellNum(cell)
@@ -329,27 +343,63 @@ function scoreColumns (ws) {
   return cols
 }
 
+// 增量累加之前用的校验：这次要改的格子里，哪些是公式。
+// 程序不会计算公式，在公式格上做"累加"只能把公式整个换成数字（公式从此消失，Excel 里再怎么改别的格子它也不会跟着变）；
+// 公式没有保存计算结果时，甚至只能按 0 起算、写进去一个错的数。所以这种格子一律不改，列出来让用户先处理
+function formulaCellsIn (ws, map, col, entries) {
+  const names = []
+  for (const [memberName] of entries) {
+    if (isFormula(ws.getRow(map.get(memberName)).getCell(col))) names.push(memberName)
+  }
+  return names
+}
+
+function formulaCellError (names, columnLabel) {
+  return {
+    ok: false,
+    code: 'FORMULA_CELL',
+    error: `以下队员在「${columnLabel}」这一列里的格子是公式，程序不改写公式：${names.join('、')}。` +
+      '请先在 Excel / WPS 里把这些格子换成数值（复制后在原位置"选择性粘贴 → 数值"），再重新操作',
+    data: { formulaCells: names }
+  }
+}
+
+// B~E 四列的名称：照抄主表表头，主表里没写时用默认名称
+function fixedColLabel (ws, col) {
+  return cellText(ws.getRow(1).getCell(col)) || ['夜训周训', '升降旗', '后勤', '综办'][col - 2] || `第 ${col} 列`
+}
+
 // 重算所有队员行的 F 列：F = B + C + D + E + 全部活动列之和（空单元格按 0）。
-// 届别行和姓名为空的行不动。
+// 届别行、姓名为空的行、「合计」这类文字行不动。
 // deltasByRow 是本次操作对各行的"预期汇总变化量"，用来区分"本次操作带来的正常变化"和
 // "原汇总本来就和明细对不上"；后者以及"没有计算结果的公式"都会被统计出来交给界面提示。
 function recalcSummary (ws, deltasByRow) {
   const cols = scoreColumns(ws)
   const summaryFixed = []
+  const untouchedRows = []
   let uncalculatedFormulas = 0
   let summaryFormat = null // 用到时才去取（绝大多数表里汇总格本来就是数字，用不到）
   for (let r = 2; r <= ws.rowCount; r++) {
     const row = ws.getRow(r)
     const name = textIn(row, NAME_COL)
-    if (!name || COHORT_RE.test(name)) continue
+    if (!name || COHORT_RE.test(name) || isLabelRowName(name)) continue
     let sum = 0
+    let hasDetailNumber = false
     for (const c of cols) {
       const cell = row.getCell(c)
       if (isFormulaWithoutNumber(cell)) uncalculatedFormulas++
-      sum += cellNumOr0(cell)
+      const v = cellNum(cell)
+      if (v !== null) hasDetailNumber = true
+      sum += v === null ? 0 : v
     }
     const fCell = row.getCell(SUMMARY_COL)
     const fRaw = cellNum(fCell)
+    // 明细里一格数字都没有，汇总格里却是一个"算出了数值"的公式：这一行的汇总格不是本行明细的和，
+    // 多半是一行合计（只是名字里没有"合计"这类字样）。按明细重算会把它改成 0，所以原样保留，并报告给界面
+    if (!hasDetailNumber && fRaw !== null && fRaw !== 0 && isFormula(fCell)) {
+      untouchedRows.push({ name, row: r, summary: fRaw })
+      continue
+    }
     const oldF = fRaw === null ? 0 : fRaw
     const newF = round4(sum)
     // 汇总格里不是数字（文字、日期、错误值、没算出来的公式）：读不出数值，要改成算出来的数字。
@@ -372,7 +422,7 @@ function recalcSummary (ws, deltasByRow) {
     // from 为 null 表示原来汇总格是空的或者不是数字
     if (badContent || Math.abs(newF - expected) > EPSILON) summaryFixed.push({ name, row: r, from: fRaw, to: newF })
   }
-  return { summaryFixed, uncalculatedFormulas }
+  return { summaryFixed, uncalculatedFormulas, untouchedRows }
 }
 
 // 所有写操作的公共骨架：
@@ -453,6 +503,7 @@ async function readWorkbook (excelPath) {
       .filter((name, i, all) => all.indexOf(name) !== i)
 
     const members = []
+    const labelRows = []
     const nameCount = {}
     let generation = null
     for (let r = 2; r <= ws.rowCount; r++) {
@@ -461,6 +512,8 @@ async function readWorkbook (excelPath) {
       if (!a) continue
       const m = a.match(COHORT_RE)
       if (m) { generation = parseInt(m[1], 10); continue }
+      // 「合计」「备注」这类文字行不是队员：不放进名单，但要让界面知道有这么几行被跳过了
+      if (isLabelRowName(a)) { labelRows.push({ row: r, name: a }); continue }
       // 活动分按"列号"存，而不是按活动名存：两列重名时，按名字存会让后一列覆盖前一列
       const extras = {}
       for (const ac of activityColumns) extras[ac.col] = cellNum(row.getCell(ac.col))
@@ -486,6 +539,7 @@ async function readWorkbook (excelPath) {
         headers,
         members,
         activityColumns,
+        labelRows,
         duplicateNames,
         duplicateColumns,
         lastCol,
@@ -612,6 +666,8 @@ async function applyIncrement (excelPath, payload) {
       if (missing.length) {
         return { ok: false, code: 'MEMBER_MISSING', error: `以下队员在主表中不存在：${missing.join('、')}`, data: { missing } }
       }
+      const formulaCells = formulaCellsIn(ws, map, col, entries)
+      if (formulaCells.length) return formulaCellError(formulaCells, fixedColLabel(ws, col))
       return { ok: true, map, dups }
     },
     commit (ws, { map }) {
@@ -644,6 +700,8 @@ async function applyEventEdit (excelPath, payload) {
       if (missing.length) {
         return { ok: false, code: 'MEMBER_MISSING', error: `以下队员在主表中不存在：${missing.join('、')}`, data: { missing } }
       }
+      const formulaCells = formulaCellsIn(ws, map, colIdx, entries)
+      if (formulaCells.length) return formulaCellError(formulaCells, name)
       return { ok: true, map, dups, colIdx }
     },
     commit (ws, { map, colIdx }) {
@@ -682,7 +740,7 @@ async function deleteActivityColumn (excelPath, payload) {
       for (let r = 2; r <= ws.rowCount; r++) {
         const row = ws.getRow(r)
         const member = textIn(row, NAME_COL)
-        if (!member || COHORT_RE.test(member)) continue
+        if (!member || COHORT_RE.test(member) || isLabelRowName(member)) continue
         const v = cellNum(row.getCell(colIdx))
         if (v !== null && v !== 0) deltasByRow.set(r, round4(-v))
       }
@@ -706,7 +764,17 @@ async function restoreBackup (excelPath, backupPath) {
   }
   if (!fileExists(abs)) return { ok: false, code: 'NOT_FOUND', error: '备份文件不存在' }
   try {
-    fs.copyFileSync(abs, excelPath)
+    // 和写入一样：先在同一个文件夹里拷出一份完整的临时文件，再用它替换主表。
+    // 直接往主表上拷贝的话，拷到一半失败（磁盘满、被别的程序打断）会留下一个截断的、打不开的表格
+    const tmp = `${excelPath}.restore-${process.pid}-${Date.now()}`
+    try {
+      fs.copyFileSync(abs, tmp)
+      const err = await replaceFile(tmp, excelPath)
+      if (err) throw err
+    } catch (e) {
+      try { fs.unlinkSync(tmp) } catch (_) {}
+      throw e
+    }
     return { ok: true }
   } catch (e) {
     return { ok: false, code: e.code || 'RESTORE_FAIL', error: `恢复备份失败：${describeIoError(e)}` }

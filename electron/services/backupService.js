@@ -23,9 +23,13 @@ function backupExcel (excelPath) {
   return dest
 }
 
+// 清理旧备份：只认"时间戳[_序号]_原文件名.xlsx"这种完整文件名，并且原文件名要和本表完全一致。
+// 不能只看"是不是以 _积分.xlsx 结尾"：同目录下另有「总_积分.xlsx」时，它的备份也以 _积分.xlsx 结尾，
+// 会被算进本表的 20 份上限，本表的备份就可能被多删几份
 function prune (dir, base) {
+  const re = new RegExp(`^\\d{8}_\\d{6}(?:_\\d+)?_${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.xlsx$`)
   const files = fs.readdirSync(dir)
-    .filter(f => f.endsWith(`_${base}.xlsx`))
+    .filter(f => re.test(f))
     .map(f => {
       // 备份已经拷贝成功后才走到这里；万一某个旧备份恰好被别的东西删了，跳过它即可，不能让本次写入失败
       try { return { f, t: fs.statSync(path.join(dir, f)).mtimeMs } } catch (_) { return null }

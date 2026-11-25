@@ -100,18 +100,127 @@ const lockService = require('../electron/services/lockService')
       objectKey: 'flag::B1', label: '升降旗导入', details: { 张三: 1.5 },
       meta: { rate: 0.5, targetCol: 3 }
     })
-    const saved = projectService.saveProject(configPath, opened)
+    const saved = await projectService.saveProject(configPath, opened)
     assert(saved.ok, saved.error)
     const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf-8'))
     assert.strictEqual(onDisk.history.length, 1)
     assert(onDisk.updatedAt >= opened.createdAt)
   })
 
-  await t('saveProject 失败时不留下临时文件', () => {
+  await t('saveProject 失败时不留下临时文件', async () => {
     const bad = path.join(tmp, '不存在的目录', 'x.json')
-    const r = projectService.saveProject(bad, { projectName: 'x' })
+    const r = await projectService.saveProject(bad, { projectName: 'x' })
     assert(!r.ok, '应失败')
     assert(!fs.existsSync(`${bad}.tmp-${process.pid}`), '不应留下临时文件')
+  })
+
+  await t('saveProject：路径不是字符串时直接拒绝，不在别处留下文件', async () => {
+    const before = fs.readdirSync(process.cwd())
+    for (const bad of [undefined, null, 123, '', '   ', { a: 1 }, ['x.json']]) {
+      const r = await projectService.saveProject(bad, { projectName: 'x' })
+      assert(!r.ok && r.code === 'BAD_PATH', JSON.stringify(bad))
+      assert(/路径/.test(r.error), r.error)
+    }
+    assert.deepStrictEqual(fs.readdirSync(process.cwd()), before, '当前目录里不应多出任何文件')
+    lockService.release(undefined) // 释放锁时传入不是路径的参数也不应抛异常
+    lockService.release(123)
+  })
+
+  // 后面两个"替换文件"的测试在一份配置副本上做，免得改动了主配置、影响后面的最近项目测试
+  const retryCfg = path.join(tmp, '重试保存.json')
+  fs.copyFileSync(configPath, retryCfg)
+
+  await t('saveProject：要保存的内容不是一份完整的配置时拒绝保存，不覆盖原来的项目文件', async () => {
+    const before = fs.readFileSync(configPath, 'utf-8')
+    for (const bad of [undefined, null, 'text', 123, [], { projectName: 'x' }, { ...JSON.parse(before), excelPath: '  ' }]) {
+      const r = await projectService.saveProject(configPath, bad)
+      assert(!r.ok && r.code === 'BAD_CONFIG', `传入 ${JSON.stringify(bad)} 时应拒绝：${JSON.stringify(r)}`)
+      assert(/没有保存/.test(r.error), r.error)
+    }
+    assert.strictEqual(fs.readFileSync(configPath, 'utf-8'), before, '磁盘上的项目文件应原样不动')
+    assert.deepStrictEqual(fs.readdirSync(tmp).filter(f => f.includes('.tmp-')), [], '不应留下临时文件')
+  })
+
+  await t('saveProject：替换文件时被"一闪而过"地占用（EPERM），稍等重试后保存成功', async () => {
+    const realRename = fs.renameSync
+    let fails = 2
+    fs.renameSync = (a, b) => {
+      if (fails > 0) { fails--; throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' }) }
+      return realRename(a, b)
+    }
+    try {
+      const opened = projectService.openProject(retryCfg).data
+      opened.projectName = '重试后保存'
+      const r = await projectService.saveProject(retryCfg, opened)
+      assert(r.ok, r.error)
+      assert.strictEqual(fails, 0, '应当重试到成功为止')
+      assert.strictEqual(JSON.parse(fs.readFileSync(retryCfg, 'utf-8')).projectName, '重试后保存')
+    } finally {
+      fs.renameSync = realRename
+    }
+    assert.deepStrictEqual(fs.readdirSync(tmp).filter(f => f.includes('.tmp-')), [], '不应留下临时文件')
+  })
+
+  await t('saveProject：文件一直被占用时重试几次后放弃，报出"被占用"并且不留下临时文件', async () => {
+    const realRename = fs.renameSync
+    let calls = 0
+    fs.renameSync = () => { calls++; throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' }) }
+    try {
+      const opened = projectService.openProject(retryCfg).data
+      const r = await projectService.saveProject(retryCfg, opened)
+      assert(!r.ok && r.code === 'EPERM', JSON.stringify(r))
+      assert(/被其他程序占用/.test(r.error), r.error)
+      assert(calls >= 3, `应当重试多次，实际调用了 ${calls} 次`)
+    } finally {
+      fs.renameSync = realRename
+    }
+    assert.deepStrictEqual(fs.readdirSync(tmp).filter(f => f.includes('.tmp-')), [], '不应留下临时文件')
+    assert.strictEqual(JSON.parse(fs.readFileSync(retryCfg, 'utf-8')).projectName, '重试后保存', '保存失败时磁盘上的配置文件应保持原样')
+  })
+
+  await t('锁：表格是只读属性时，报"只读"而不是"被占用"', async () => {
+    const ro = path.join(tmp, '只读表格.xlsx')
+    await excelService.createTemplate(ro)
+    fs.chmodSync(ro, 0o444) // Windows 上等于勾选"只读"属性
+    try {
+      const probe = lockService.probeWritable(ro)
+      assert(!probe.ok && probe.reason === 'readonly', JSON.stringify(probe))
+      const acq = lockService.acquire(ro, '只读项目', configPath)
+      assert(!acq.ok && acq.reason === 'readonly', JSON.stringify(acq))
+      const w = await excelService.applyIncrement(ro, { targetCol: 2, deltas: { 甲: 1 } })
+      assert(!w.ok && w.code === 'EREADONLY', JSON.stringify(w))
+      assert(/只读/.test(w.error), w.error)
+    } finally {
+      fs.chmodSync(ro, 0o666)
+    }
+    assert.strictEqual(lockService.probeWritable(ro).ok, true, '取消只读后应当可写')
+  })
+
+  await t('占用检测：被别的程序独占（EBUSY）、一闪而过的 EPERM 都报"被占用"；带只读属性或没有权限才报"只读"', async () => {
+    const ro = path.join(tmp, '占用检测.xlsx')
+    await excelService.createTemplate(ro)
+    // 不真的去占用文件：把"打开"换成直接抛出指定的错误
+    const realOpen = fs.openSync
+    const fake = code => (p, flags, mode) => {
+      if (p === ro) throw Object.assign(new Error(`fake ${code}`), { code })
+      return realOpen(p, flags, mode)
+    }
+    try {
+      fs.openSync = fake('EBUSY')
+      assert.strictEqual(lockService.probeWritable(ro).reason, 'busy', 'Excel / WPS 开着表格时报 EBUSY')
+      fs.openSync = fake('EPERM')
+      assert.strictEqual(lockService.probeWritable(ro).reason, 'busy', '文件不是只读：EPERM 是杀毒软件 / 索引服务一闪而过的占用')
+      fs.chmodSync(ro, 0o444)
+      assert.strictEqual(lockService.probeWritable(ro).reason, 'readonly', '文件带只读属性：同样是 EPERM，报"只读"')
+      fs.chmodSync(ro, 0o666)
+      fs.openSync = fake('EACCES')
+      assert.strictEqual(lockService.probeWritable(ro).reason, 'readonly', '没有写入权限：提示里也带着这一条')
+      fs.openSync = fake('EISDIR')
+      assert.strictEqual(lockService.probeWritable(ro).ok, true, '别的错误不下结论，留给后面的读写去报告')
+    } finally {
+      fs.openSync = realOpen
+      fs.chmodSync(ro, 0o666)
+    }
   })
 
   await t('最近项目：push/list/remove', async () => {

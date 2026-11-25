@@ -9,6 +9,7 @@ function win () { return BrowserWindow.getFocusedWindow() || BrowserWindow.getAl
 const XLSX_FILTER = [{ name: 'Excel 工作簿', extensions: ['xlsx'] }]
 const JSON_FILTER = [{ name: '国护项目文件', extensions: ['json'] }]
 
+// 打开项目时加不上锁的原因，换成使用者能看懂的话
 function busyError (lock) {
   if (lock.reason === 'busy') {
     return {
@@ -17,6 +18,15 @@ function busyError (lock) {
       error: '这张表格正被其他程序占用（多半是在 Excel / WPS 里开着），请先关闭该表格再试'
     }
   }
+  if (lock.reason === 'readonly') {
+    return {
+      ok: false,
+      code: 'EREADONLY',
+      error: '这张表格是只读的（文件属性里勾选了"只读"，或者当前账号没有写入权限），请先取消只读，再重新打开项目'
+    }
+  }
+  if (lock.reason === 'lockfail') return { ok: false, code: 'LOCK_FAIL', error: lock.error }
+  if (lock.reason === 'not-found') return { ok: false, code: 'EXCEL_MISSING', error: `绑定的 Excel 文件不存在：${lock.excelPath || '（路径未知）'}` }
   const holder = lock.lock && lock.lock.projectName ? `（占用项目：${lock.lock.projectName}）` : ''
   return { ok: false, code: 'LOCKED', error: `这张表格已被其他项目占用${holder}，请先在那个项目里点“关闭项目并释放锁定”` }
 }
@@ -116,13 +126,18 @@ function registerIpc () {
   })
 
   ipcMain.handle('project:open', async (_e, configPath) => {
-    const opened = projectService.openProject(configPath)
-    if (!opened.ok) return opened
-    const cfg = opened.data
-    const lock = lockService.acquire(cfg.excelPath, cfg.projectName, cfg.configPath)
-    if (!lock.ok) return busyError(lock)
-    projectService.pushRecent(cfg)
-    return { ok: true, data: cfg }
+    // 主进程接口不能向外抛异常：任何一步出错都整理成带说明的结果交给界面
+    try {
+      const opened = projectService.openProject(configPath)
+      if (!opened.ok) return opened
+      const cfg = opened.data
+      const lock = lockService.acquire(cfg.excelPath, cfg.projectName, cfg.configPath)
+      if (!lock.ok) return busyError(lock)
+      projectService.pushRecent(cfg)
+      return { ok: true, data: cfg }
+    } catch (e) {
+      return { ok: false, code: e.code || 'OPEN_FAIL', error: `项目打开失败：${describeError(e)}` }
+    }
   })
 
   ipcMain.handle('project:save', (_e, configPath, cfg) => projectService.saveProject(configPath, cfg))

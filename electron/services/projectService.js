@@ -2,6 +2,7 @@ const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
 const { app } = require('electron')
+const { replaceFile } = require('./replaceFile')
 
 // 规范化一个路径：转成绝对路径，并在 Windows 上把盘符统一写成大写。
 // 同一个文件，不同来源写出的盘符大小写可能不一样（文件对话框一般给 E:\，手工输入或某些环境给 e:\，
@@ -107,14 +108,24 @@ function openProject (configPath) {
   }
 }
 
-// 先写临时文件再改名替换，避免写一半时崩溃留下损坏的配置文件
-function saveProject (configPath, cfg) {
+// 先写临时文件再改名替换，避免写一半时崩溃留下损坏的配置文件。
+// 改名替换带着重试（见 replaceFile 的说明），避免被杀毒软件、搜索索引这类"一闪而过"的占用打断
+async function saveProject (configPath, cfg) {
+  if (typeof configPath !== 'string' || !configPath.trim()) {
+    return { ok: false, code: 'BAD_PATH', error: '项目配置保存失败：没有给定配置文件的路径' }
+  }
+  // 要存的内容必须是一份完整的配置。万一界面传来的内容缺了表格路径，照原样写下去会把一个好端端的项目文件覆盖成打不开的样子，
+  // 所以这里宁可拒绝保存（这一笔写入会由界面用备份回滚），也不覆盖
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || typeof cfg.excelPath !== 'string' || !cfg.excelPath.trim()) {
+    return { ok: false, code: 'BAD_CONFIG', error: '项目配置保存失败：要保存的配置内容不完整（缺少绑定的表格路径）。为避免覆盖原来的项目文件，这次没有保存' }
+  }
   const target = normalizePath(configPath)
   const tmp = `${target}.tmp-${process.pid}`
   try {
     const out = { ...cfg, configPath: target, updatedAt: new Date().toISOString() }
     fs.writeFileSync(tmp, JSON.stringify(out, null, 2), 'utf-8')
-    fs.renameSync(tmp, target)
+    const err = await replaceFile(tmp, target)
+    if (err) throw err
     return { ok: true, data: out }
   } catch (e) {
     try { fs.unlinkSync(tmp) } catch (_) {}
