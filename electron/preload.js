@@ -1,5 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
+// 界面允许调用的通道白名单：不在名单里的通道一律拒绝
 const ALLOWED = new Set([
   'dialog:openExcel',
   'dialog:saveProjectFile',
@@ -12,13 +13,12 @@ const ALLOWED = new Set([
   'project:open',
   'project:save',
   'project:close',
-  'lock:check',
   'excel:read',
-  'excel:createTemplate',
   'excel:commitEvent',
   'excel:applyIncrement',
   'excel:applyEventEdit',
   'excel:deleteActivityColumn',
+  'excel:restoreBackup',
   'excel:readExternal'
 ])
 

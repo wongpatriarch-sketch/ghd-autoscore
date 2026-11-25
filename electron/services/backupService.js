@@ -14,18 +14,10 @@ function backupExcel (excelPath) {
   const dir = path.join(path.dirname(excelPath), '.backups')
   fs.mkdirSync(dir, { recursive: true })
   const base = path.basename(excelPath, path.extname(excelPath))
-  const timeStr = ts()
-  let dest = path.join(dir, `${timeStr}_${base}.xlsx`)
-
-  // 若当前秒内已存在同名备份，递增序号生成新文件，防止覆盖
-  if (fs.existsSync(dest)) {
-    let seq = 1
-    while (fs.existsSync(path.join(dir, `${timeStr}_${seq}_${base}.xlsx`))) {
-      seq++
-    }
-    dest = path.join(dir, `${timeStr}_${seq}_${base}.xlsx`)
-  }
-
+  // 文件名只精确到秒：同一秒内连续写入时追加序号，保证每份备份都是独立的
+  // （否则后一次写入会覆盖前一次的备份，回滚时就恢复不到正确的状态）
+  let dest = path.join(dir, `${ts()}_${base}.xlsx`)
+  for (let n = 2; fs.existsSync(dest); n++) dest = path.join(dir, `${ts()}_${n}_${base}.xlsx`)
   fs.copyFileSync(excelPath, dest)
   prune(dir, base)
   return dest
@@ -35,11 +27,8 @@ function prune (dir, base) {
   const files = fs.readdirSync(dir)
     .filter(f => f.endsWith(`_${base}.xlsx`))
     .map(f => {
-      try {
-        return { f, t: fs.statSync(path.join(dir, f)).mtimeMs }
-      } catch (_) {
-        return null
-      }
+      // 备份已经拷贝成功后才走到这里；万一某个旧备份恰好被别的东西删了，跳过它即可，不能让本次写入失败
+      try { return { f, t: fs.statSync(path.join(dir, f)).mtimeMs } } catch (_) { return null }
     })
     .filter(Boolean)
     .sort((a, b) => b.t - a.t)
