@@ -86,6 +86,15 @@ const openProjectCard = () => app.run(`(() => {
   c.click()
   return 'ok'
 })()`)
+// 结算页上从上往下数第 index 个某种小按钮（"＋ 新增卡片" / "－ 删除本卡片"）
+const clickCardButton = (title, index) => app.run(`(() => {
+  const b = document.querySelectorAll('button[title=${JSON.stringify(title)}]')[${index}]
+  if (!b) return 'no button'
+  b.click()
+  return 'ok'
+})()`)
+// 结算页上一共有几个多行文本框（每张训练 / 彩排卡片 2 个，正式环节 2 个）
+const textareaCount = () => app.run('document.querySelectorAll("textarea.input").length')
 
 // 表格的"排版"：各列列宽、表头行高、是否冻结。撤销新建活动后用来确认排版也恢复了
 async function layoutOf (file) {
@@ -169,11 +178,43 @@ async function main () {
   // 同一个名字重复写 3 遍、外加空的逗号：应当只算 1 位
   await app.setValue(HEAD_INPUT, 0, `${names[0]}，${names[0]}  ${names[0]}，,`); await settled()
   await app.click('生成预览'); await settled()
-  r.check(await has(`已识别 1 位：${names[0]}`) && await has('存在完全空的彩排卡片'), '主教官重复写同一个名字只算 1 位；彩排卡片是空的：提示补充名单')
+  // 彩排环节那张删不掉的卡片整张留空 = 这次活动没有彩排，不算错，所以拦下来的是下一条：正式"参加"没填
+  r.check(await has(`已识别 1 位：${names[0]}`) && await has('正式活动「参加」名单不能为空') && await has('训练 0 张 · 彩排 0 张 · 正式 1 张'), '主教官重复写同一个名字只算 1 位；彩排卡片整张留空（表示没有彩排）不报错，张数也按 0 张显示')
 
-  await app.setValue('textarea.input', 1, `${names[1]}、查无此人甲`); await settled() // 第 1 张彩排卡片的"参训"
+  // 彩排只填参训、没填教官：教官不能为空
+  await app.setValue('textarea.input', 1, names[1]); await settled() // 第 1 张彩排卡片的"参训"
   await app.click('生成预览'); await settled()
-  r.check(await has('正式活动「参加」名单不能为空'), '正式活动"参加"没填：提示不能为空')
+  r.check(await has('第 1 次彩排填了参训队员，却没有填教官'), '彩排卡片只填参训、没填教官：提示教官不能为空')
+  await app.setValue('textarea.input', 1, ''); await settled()
+
+  // 训练环节加一张卡片。此时页面上的多行文本框依次是：训练1教官、训练1参训、彩排教官、彩排参训、正式参加、正式场务
+  r.check((await clickCardButton('新增卡片', 0)) === 'ok' && (await textareaCount()) === 6, '训练环节点 ＋ 新增一张卡片')
+  await app.click('生成预览'); await settled()
+  r.check(await has('第 1 次训练的教官和参训都是空的，不需要的话请点 － 删掉这张卡片'), '训练卡片什么都没填：提示删掉这张卡片')
+  await app.setValue('textarea.input', 1, names[2]); await settled() // 训练1"参训"
+  await app.click('生成预览'); await settled()
+  r.check(await has('第 1 次训练填了参训队员，却没有填教官'), '训练卡片只填参训、没填教官：提示教官不能为空')
+  r.check((await clickCardButton('删除本卡片', 0)) === 'ok' && (await textareaCount()) === 4, '训练卡片点 － 删掉，页面恢复成 4 个多行文本框')
+
+  // 彩排环节也加一张卡片（第 2 个"新增卡片"按钮是彩排环节的）。此时文本框依次是：
+  // 彩排1教官、彩排1参训、彩排2教官、彩排2参训、正式参加、正式场务
+  r.check((await clickCardButton('新增卡片', 1)) === 'ok' && (await textareaCount()) === 6, '彩排环节点 ＋ 新增一张卡片')
+  await app.click('生成预览'); await settled()
+  r.check(await has('第 1 次彩排的教官和参训都是空的，不需要的话请点 － 删掉这张卡片'), '有两张彩排卡片时，空着的那张不再表示"没有彩排"：提示删掉（第 1 张）')
+  await app.setValue('textarea.input', 0, names[1]); await settled() // 彩排1"教官"
+  await app.click('生成预览'); await settled()
+  r.check(await has('第 2 次彩排的教官和参训都是空的，不需要的话请点 － 删掉这张卡片'), '第 1 张填了教官、第 2 张还空着：提示删掉第 2 张')
+  await app.setValue('textarea.input', 2, names[2]); await settled() // 彩排2"教官"
+  await app.click('生成预览'); await settled()
+  r.check(await has('正式活动「参加」名单不能为空') && await has('训练 0 张 · 彩排 2 张 · 正式 1 张'), '两张彩排卡片都只填教官（对外带训）：合格，张数显示 2 张；接着提示正式"参加"没填')
+  // 删掉第 2 张彩排卡片（两张时每张卡片上都有"－"，从上往下第 2 个就是第 2 张的）
+  r.check((await clickCardButton('删除本卡片', 1)) === 'ok' && (await textareaCount()) === 4 && (await app.run('document.querySelectorAll(\'button[title="删除本卡片"]\').length')) === 0, '彩排卡片点 － 删掉第 2 张，页面恢复成 4 个多行文本框（只剩 1 张时卡片上不再有 －）')
+  r.check((await app.run('document.querySelectorAll("textarea.input")[0].value')) === names[1], '删掉的是第 2 张：第 1 张彩排卡片里填的教官还在')
+
+  // 改成只填教官、参训留空（对外带训就是这样）：合格，接着往下检查
+  await app.setValue('textarea.input', 0, `${names[1]}、查无此人甲`); await settled() // 第 1 张彩排卡片的"教官"
+  await app.click('生成预览'); await settled()
+  r.check(await has('正式活动「参加」名单不能为空') && !(await has('却没有填教官')) && await has('训练 0 张 · 彩排 1 张 · 正式 1 张'), '彩排卡片只填教官、参训留空（对外带训）：不报错；正式活动"参加"没填：提示不能为空')
 
   await app.setValue('textarea.input', 2, `${names[0]}，${names[1]}、${names[2]}、查无此人乙`); await settled() // 正式"参加"
   await app.setValue('textarea.input', 3, names[3]); await settled() // 正式"场务"
@@ -191,7 +232,7 @@ async function main () {
   r.section('活动积分结算：未知名预警 → 预览 → 写入')
   const warn = await app.run('[...document.querySelectorAll(".text-amber-200")].map(e => e.textContent.trim())')
   const wantWarn = ['查无此人甲', '查无此人乙']
-  r.check(await has('名单校验预警') && await has('来源：彩排1参训') && await has('来源：正式参加'), '出现"名单校验预警"，并标出每个未知名来自哪一栏')
+  r.check(await has('名单校验预警') && await has('来源：彩排1教官') && await has('来源：正式参加'), '出现"名单校验预警"，并标出每个未知名来自哪一栏')
   r.check(JSON.stringify(warn) === JSON.stringify(wantWarn), '预警里列出的正是那 2 个查无此人的人名' + (JSON.stringify(warn) === JSON.stringify(wantWarn) ? '' : `（实际：${JSON.stringify(warn)}）`))
   await app.shot('03-未知名预警.png')
   r.check((await resolveUnknown('查无此人甲', names[4])) === 'ok', '把"查无此人甲"修正为名单里的队员（"查无此人乙"保持忽略）')

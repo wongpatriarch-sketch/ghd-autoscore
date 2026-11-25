@@ -18,7 +18,7 @@ esbuild.buildSync({
   logLevel: 'silent'
 })
 
-const { pages, parseNames, React } = require(bundlePath)
+const { pages, parseNames, validateEventForm, computeEventScores, countCards, React } = require(bundlePath)
 const { renderToString } = require('react-dom/server')
 
 const noop = () => {}
@@ -152,6 +152,100 @@ t('parseNames：只靠空格隔开的多个带空格名字没法确定断法，�
   assert.strictEqual(names('张\t三'), JSON.stringify(['张', '三']), '制表符两侧是两格内容，不算同一个名字')
   assert.strictEqual(names('艾克拜尔·司马义'), JSON.stringify(['艾克拜尔·司马义']), '带间隔号的姓名原样保留')
   assert.strictEqual(names('张三 李四'), JSON.stringify(['张三', '李四']), '普通的空格分隔不受影响')
+})
+
+// ---------- 活动结算表单的校验与计分（src/lib/eventForm.js） ----------
+const card = (coaches = '', participants = '', hours = 1) => ({ id: Math.random(), hours, coaches, participants })
+const rosterSet = new Set(['张三', '李四', '王五', '赵六'])
+const dupSet = new Set(['张三'])
+// 一张"没填教官也没填参训"的多余卡片：校验提示的后半句
+const blank = '的教官和参训都是空的，不需要的话请点 － 删掉这张卡片'
+// 主表测试数据的活动列是「国庆出旗」「元旦出旗」「九三阅兵出旗」，这里的活动名特意都不重名
+const baseForm = () => ({
+  activityName: '五四出旗',
+  headCoaches: '赵六',
+  trainings: [card('赵六', '', 2)],
+  rehearsals: [card('王五', '张 三', 1.5)],
+  formal: { hours: 2.5, participants: '李四', stageCrew: '王五' }
+})
+t('validateEventForm：教官必填、参训可以留空（对外带训）', () => {
+  assert.strictEqual(validateEventForm({ ...baseForm(), excel }), '', '基准表单应通过')
+  assert.strictEqual(validateEventForm({ ...baseForm(), trainings: [card('赵六'), card('李四', '王五')] }), '', '训练卡片：只有教官 / 教官参训都有，都合格')
+  assert.strictEqual(validateEventForm({ ...baseForm(), rehearsals: [card('王五')] }), '', '彩排卡片：只有教官也合格')
+  assert.strictEqual(validateEventForm({ ...baseForm(), trainings: [card(' 赵六 ', '   ')] }), '', '名字两头的空白不算内容')
+  assert.strictEqual(validateEventForm({ ...baseForm(), trainings: [] }), '', '没有训练时把卡片全部删掉是允许的')
+  // 只填了参训、没填教官：不合格，提示里说明教官不能为空、参训可以留空
+  assert.strictEqual(validateEventForm({ ...baseForm(), trainings: [card('', '张三')] }), '第 1 次训练填了参训队员，却没有填教官。教官不能为空，参训可以留空')
+  assert.strictEqual(validateEventForm({ ...baseForm(), rehearsals: [card('', '张三')] }), '第 1 次彩排填了参训队员，却没有填教官。教官不能为空，参训可以留空')
+})
+t('validateEventForm：空卡片的处理——训练卡片不能空；彩排仅剩的一张留空表示"没有彩排"', () => {
+  assert.strictEqual(validateEventForm({ ...baseForm(), rehearsals: [card()] }), '', '删不掉的那张彩排卡片留空 = 没有彩排')
+  assert.strictEqual(validateEventForm({ ...baseForm(), rehearsals: [card(' ', null, 1)] }), '', '没填过的卡片（内容是 null）同样算留空')
+  assert.strictEqual(validateEventForm({ ...baseForm(), rehearsals: [{ id: 1, hours: 1, coaches: undefined, participants: undefined }] }), '', '新建卡片的输入框内容是 undefined')
+  assert.strictEqual(validateEventForm({ ...baseForm(), trainings: [card('赵六', '', 2), card()] }), `第 2 次训练${blank}`)
+  assert.strictEqual(validateEventForm({ ...baseForm(), rehearsals: [card('王五'), card()] }), `第 2 次彩排${blank}`, '有两张彩排卡片时，空的那张要删掉')
+  assert.strictEqual(validateEventForm({ ...baseForm(), rehearsals: [card(), card('王五')] }), `第 1 次彩排${blank}`, '提示里的序号是卡片在表单里的位置')
+  assert.strictEqual(validateEventForm({ ...baseForm(), rehearsals: [card(' ', ' ', 1), card('王五')] }), `第 1 次彩排${blank}`)
+})
+t('validateEventForm：活动名称、主教官人数、正式名单、和主表里的列重名', () => {
+  assert.strictEqual(validateEventForm({ ...baseForm(), excel }), '', '和主表里哪一列都不同名，通过')
+  assert.strictEqual(validateEventForm({ ...baseForm(), activityName: '  ' }), '请填写活动名称（它会成为主表里新加那一列的表头）')
+  assert.strictEqual(validateEventForm({ ...baseForm(), headCoaches: '' }), '主教官需填写 1~5 位人名，不能为空')
+  assert.strictEqual(validateEventForm({ ...baseForm(), headCoaches: '赵六,李四,王五,张三,钱七,孙八' }), '主教官需填写 1~5 位人名，不能为空')
+  assert.strictEqual(validateEventForm({ ...baseForm(), headCoaches: '赵六,李四,王五,张三,钱七' }), '', '5 位主教官是上限')
+  assert.strictEqual(validateEventForm({ ...baseForm(), headCoaches: '赵六,赵六 李四' }), '', '重复的名字只算一位')
+  assert.strictEqual(validateEventForm({ ...baseForm(), formal: { hours: 1, participants: ' \n ', stageCrew: '' } }), '正式活动「参加」名单不能为空')
+  assert.strictEqual(validateEventForm({ ...baseForm(), formal: { hours: 1, participants: '李四', stageCrew: '' } }), '', '场务可以留空')
+  assert.strictEqual(validateEventForm({ ...baseForm(), activityName: '国庆出旗', excel }), '主表中已存在同名活动列「国庆出旗」，请更换活动名称')
+  assert.strictEqual(validateEventForm({ ...baseForm(), activityName: ' 元旦出旗 ', excel }), '主表中已存在同名活动列「元旦出旗」，请更换活动名称', '名称两头的空白不算')
+  assert.strictEqual(validateEventForm({ ...baseForm(), activityName: ' 汇总 ', excel }), '主表里已经有一列叫「汇总」，活动名称不能和它相同，请换一个', '不能和固定列（姓名、汇总……）重名')
+  assert.strictEqual(validateEventForm({ ...baseForm(), activityName: '姓名', excel }), '主表里已经有一列叫「姓名」，活动名称不能和它相同，请换一个')
+  assert.strictEqual(validateEventForm({ ...baseForm(), activityName: '出旗' }), '', '不是完全相同的名字不算重名')
+  assert.strictEqual(validateEventForm({ ...baseForm(), activityName: '五四出旗' }), '', '不传 excel 时不查重名（界面总是传）')
+  // 校验按表单从上到下的顺序，报第一条不合格的原因
+  assert.strictEqual(validateEventForm({ ...baseForm(), activityName: '', headCoaches: '' }), '请填写活动名称（它会成为主表里新加那一列的表头）')
+  assert.strictEqual(validateEventForm({ ...baseForm(), headCoaches: '', trainings: [card()] }), '主教官需填写 1~5 位人名，不能为空')
+  assert.strictEqual(validateEventForm({ ...baseForm(), trainings: [card()], formal: { hours: 1, participants: '', stageCrew: '' } }), `第 1 次训练${blank}`)
+})
+t('computeEventScores：只有教官、没有参训的卡片照样给教官记分', () => {
+  const form = { ...baseForm(), trainings: [card('赵六', '', 2), card()] } // 第二张是空卡片，不计分
+  const { rows, scores } = computeEventScores({ ...form, rosterSet, dupSet })
+  // 赵六：主教官 2 + 带训 2；李四：正式 2.5；王五：彩排 1.5 + 场务 0.5；张三：彩排 1.5
+  assert.deepStrictEqual(scores, { 赵六: 4, 李四: 2.5, 王五: 2, 张三: 1.5 })
+  assert.deepStrictEqual(rows.map(r => r.name), ['赵六', '李四', '王五', '张三'], '预览按合计从高到低排')
+  const zs = rows.find(r => r.name === '张三')
+  assert.deepStrictEqual([zs.head, zs.training, zs.rehearsal, zs.formal, zs.stage, zs.total, zs.duplicate], [0, 0, 1.5, 0, 0, 1.5, true], '「张 三」合并成一个名字；同名队员带标记')
+  const ww = rows.find(r => r.name === '王五')
+  assert.deepStrictEqual([ww.rehearsal, ww.stage, ww.total, ww.duplicate], [1.5, 0.5, 2, false])
+  assert.deepStrictEqual(rows.find(r => r.name === '赵六'), { name: '赵六', head: 2, training: 2, rehearsal: 0, formal: 0, stage: 0, total: 4, duplicate: false })
+  assert.strictEqual(countCards(form.trainings), 1, '空卡片不算一张')
+  assert.strictEqual(countCards(form.rehearsals), 1)
+  assert.strictEqual(countCards([]), 0)
+})
+t('computeEventScores：多张卡片累加；名单里不在名册的名字按"忽略 / 修正"处理', () => {
+  const form = {
+    ...baseForm(),
+    headCoaches: '赵六,钱七',
+    trainings: [card('赵六', '李四', 1), card('李四', '赵六', 2.5), card('王五')],
+    rehearsals: [card()],
+    formal: { hours: 3, participants: '钱七', stageCrew: '外人' }
+  }
+  // 未处理的名字一律忽略（和界面上选"忽略该人员"一样），不会悄悄记到别人头上
+  // 赵六：主教官 2 + 带训 1 + 参训 2.5；李四：参训 1 + 带训 2.5；王五：带训 1
+  const ignored = computeEventScores({ ...form, rosterSet, dupSet })
+  assert.deepStrictEqual(ignored.scores, { 赵六: 5.5, 李四: 3.5, 王五: 1 })
+  assert.deepStrictEqual(ignored.rows.find(r => r.name === '赵六'), { name: '赵六', head: 2, training: 3.5, rehearsal: 0, formal: 0, stage: 0, total: 5.5, duplicate: false })
+  // 「钱七」修正为张三（主教官 2 + 正式 3）；「外人」忽略
+  const fixed = computeEventScores({ ...form, rosterSet, dupSet }, { 钱七: '张三', 外人: null })
+  assert.deepStrictEqual(fixed.scores, { 赵六: 5.5, 张三: 5, 李四: 3.5, 王五: 1 })
+  assert.deepStrictEqual(fixed.rows.map(r => r.name), ['赵六', '张三', '李四', '王五'], '按合计从高到低排')
+  assert.deepStrictEqual(fixed.rows.find(r => r.name === '张三'), { name: '张三', head: 2, training: 0, rehearsal: 0, formal: 3, stage: 0, total: 5, duplicate: true })
+  // 名单整个是空的：没有人得分
+  const empty = computeEventScores({ activityName: 'x', headCoaches: '', trainings: [], rehearsals: [card()], formal: { hours: 1, participants: '', stageCrew: '' }, rosterSet, dupSet })
+  assert.deepStrictEqual(empty, { rows: [], scores: {} })
+  // 所有人都被忽略：同样是 0 人
+  const allIgnored = computeEventScores({ ...baseForm(), rosterSet: new Set(), dupSet }, { 赵六: null, 李四: null, 王五: null, 张三: null })
+  assert.deepStrictEqual(allIgnored, { rows: [], scores: {} })
 })
 
 console.log(`\n${passed} 项渲染测试通过${process.exitCode ? '（存在失败项）' : ''}`)

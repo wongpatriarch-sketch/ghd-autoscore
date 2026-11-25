@@ -8,4 +8,5 @@ import ProjectHub from '../src/pages/ProjectHub.jsx'
 
 export const pages = { Workspace, Dashboard, EventScoring, BatchImport, HistoryCenter, ProjectHub }
 export { parseNames } from '../src/lib/utils.js'
+export { validateEventForm, computeEventScores, countCards } from '../src/lib/eventForm.js'
 export { React }

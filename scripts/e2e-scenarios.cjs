@@ -161,12 +161,13 @@ const bannerOf = text => app.run(`(() => {
   return el ? el.textContent.replace(/\\s+/g, ' ').trim() : null
 })()`)
 
-// 结算页：填一张活动表单（主教官 + 一张彩排卡片的教官 / 参训 + 正式参加），其余留空
+// 结算页：填一张活动表单（主教官 + 一张彩排卡片的教官 + 正式参加），其余留空。
+// 彩排的名单填在"教官"里、"参训"留空：教官和参训的分值一样，这样填顺便覆盖了"对外带训、只有教官没有参训"的情况
 async function fillEvent (name, head, rehearsal, formal) {
   await app.setValue(NAME_INPUT, 0, name)
   await app.setValue(HEAD_INPUT, 0, head)
-  await app.setValue(TA, 0, '')
-  await app.setValue(TA, 1, rehearsal)
+  await app.setValue(TA, 0, rehearsal)
+  await app.setValue(TA, 1, '')
   await app.setValue(TA, 2, formal)
   await app.setValue(TA, 3, '')
   await settled()
@@ -910,7 +911,7 @@ async function partHandEdited () {
   await setWindowSize(1024, 680, 1)
   await sleep(400)
   await toEventPage()
-  // 结算页至少要有一张不空的彩排卡片，所以这里彩排参训填 n1、正式参加也填 n1
+  // 彩排卡片填上教官 n1（参训留空），正式参加也填 n1
   await fillEvent(EV, n0, n1, n1)
   await app.click('生成预览')
   r.check(await previewShown(EV) && (await modalText()).includes('同名待核对'), '结算预览里，同名的队员旁边标着「同名待核对」')

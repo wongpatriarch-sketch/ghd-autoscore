@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react'
 import { Modal, Badge } from '../components/ui.jsx'
-import { parseNames, makeBatchId, round4 } from '../lib/utils.js'
+import { parseNames, makeBatchId } from '../lib/utils.js'
+import { countCards, validateEventForm, computeEventScores } from '../lib/eventForm.js'
 import { api } from '../lib/api.js'
 
 const HOURS_OPTIONS = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
@@ -26,6 +27,11 @@ export default function EventScoring ({ cfg, excel, reloadExcel, recordAfterWrit
   const setTraining = (id, patch) => setTrainings(ts => ts.map(t => t.id === id ? { ...t, ...patch } : t))
   const setRehearsal = (id, patch) => setRehearsals(rs => rs.map(r => r.id === id ? { ...r, ...patch } : r))
 
+  // 真正起了作用的卡片数：填了教官的才算。底部操作栏和历史记录里显示的是这个数，
+  // 彩排环节那张删不掉的空卡片不算一次彩排
+  const trainingCount = countCards(trainings)
+  const rehearsalCount = countCards(rehearsals)
+
   // 汇总本次表单涉及的所有人名（含来源标签）
   const collectAllNames = () => {
     const items = [] // { name, source }
@@ -38,56 +44,15 @@ export default function EventScoring ({ cfg, excel, reloadExcel, recordAfterWrit
     return items
   }
 
+  // 表单校验和计分规则都写在 lib/eventForm.js 里（规则说明、计分方式见该文件）
+  const form = () => ({ activityName, headCoaches, trainings, rehearsals, formal })
+
   const validate = () => {
     setFormError('')
-    const name = activityName.trim()
-    if (!name) return '请填写活动名称（将作为 Excel 新列表头）'
-    const heads = parseNames(headCoaches)
-    if (heads.length < 1 || heads.length > 5) return '主教官需填写 1~5 位人名，不能为空'
-    if (trainings.some(t => !parseNames(t.coaches).length && !parseNames(t.participants).length)) return '存在完全空的训练卡片，请补充名单或删除该卡片'
-    if (rehearsals.some(r => !parseNames(r.coaches).length && !parseNames(r.participants).length)) return '存在完全空的彩排卡片，请补充名单或删除该卡片'
-    if (!parseNames(formal.participants).length) return '正式活动「参加」名单不能为空'
-    if (excel?.activityColumns?.some(c => c.name === name)) return `主表中已存在同名活动列「${name}」，请更换活动名称`
-    // 表格里任何一列都不能叫这个名字：和「姓名」「汇总」这些固定列重名的话，这一列在表里就分不清了。
-    // 主进程写入时也会拦，这里提前说出来，不用等到预览之后才被挡回去
-    if ((excel?.headers || []).some(h => String(h || '').trim() === name)) return `主表里已经有一列叫「${name}」，活动名称不能和它相同，请换一个`
-    return ''
+    return validateEventForm({ ...form(), excel })
   }
 
-  // 计算积分（resolutions: 未知名 -> null 忽略 / 字符串映射）
-  const computeScores = (resolutions = {}) => {
-    const resolve = (name) => {
-      if (rosterSet.has(name)) return name
-      const r = resolutions[name]
-      return r ? r : null // 未处理或忽略 -> null
-    }
-    const parts = {} // name -> { head, training, rehearsal, formal, stage }
-    const add = (rawName, key, val) => {
-      const name = resolve(rawName)
-      if (!name) return
-      if (!parts[name]) parts[name] = { head: 0, training: 0, rehearsal: 0, formal: 0, stage: 0 }
-      parts[name][key] = round4(parts[name][key] + val)
-    }
-    parseNames(headCoaches).forEach(n => add(n, 'head', 2.0))
-    trainings.forEach(t => {
-      parseNames(t.coaches).forEach(n => add(n, 'training', t.hours))
-      parseNames(t.participants).forEach(n => add(n, 'training', t.hours))
-    })
-    rehearsals.forEach(r => {
-      parseNames(r.coaches).forEach(n => add(n, 'rehearsal', r.hours))
-      parseNames(r.participants).forEach(n => add(n, 'rehearsal', r.hours))
-    })
-    parseNames(formal.participants).forEach(n => add(n, 'formal', formal.hours))
-    parseNames(formal.stageCrew).forEach(n => add(n, 'stage', 0.5))
-
-    const rows = Object.entries(parts).map(([name, p]) => {
-      const total = round4(p.head + p.training + p.rehearsal + p.formal + p.stage)
-      return { name, ...p, total, duplicate: dupSet.has(name) }
-    }).sort((a, b) => b.total - a.total)
-    const scores = {}
-    rows.forEach(r => { if (r.total) scores[r.name] = r.total })
-    return { rows, scores }
-  }
+  const computeScores = (resolutions = {}) => computeEventScores({ ...form(), rosterSet, dupSet }, resolutions)
 
   const onGeneratePreview = () => {
     const err = validate()
@@ -136,8 +101,8 @@ export default function EventScoring ({ cfg, excel, reloadExcel, recordAfterWrit
       meta: {
         source: '活动积分结算引擎',
         headCoaches: parseNames(headCoaches),
-        trainingCount: trainings.length,
-        rehearsalCount: rehearsals.length,
+        trainingCount,
+        rehearsalCount,
         formalHours: formal.hours,
         memberCount: Object.keys(preview.scores).length
       }
@@ -183,7 +148,7 @@ export default function EventScoring ({ cfg, excel, reloadExcel, recordAfterWrit
       {/* 训练卡片 */}
       <CardSection
         title="训练环节"
-        hint="按训练时长计分：1 小时 = 1.0 分。可全部删空（该活动无单独训练）。"
+        hint="按训练时长计分：1 小时 = 1.0 分。教官必填，参训可以留空（例如对外带训）。没有训练的话，把卡片全部删掉即可。"
         count={trainings.length}
         onAdd={() => setTrainings(t => [...t, newCard()])}
       >
@@ -208,7 +173,7 @@ export default function EventScoring ({ cfg, excel, reloadExcel, recordAfterWrit
       {/* 彩排卡片 */}
       <CardSection
         title="彩排环节"
-        hint="按彩排时长计分：1 小时 = 1.0 分。至少保留 1 张彩排卡片。"
+        hint="按彩排时长计分：1 小时 = 1.0 分。教官必填，参训可以留空（例如对外带训）。没有彩排的话，这一张卡片留空即可。"
         count={rehearsals.length}
         onAdd={() => setRehearsals(r => [...r, newCard()])}
       >
@@ -255,7 +220,7 @@ export default function EventScoring ({ cfg, excel, reloadExcel, recordAfterWrit
       <div className="fixed bottom-0 left-60 right-0 px-8 py-4 bg-surface-900/85 backdrop-blur-xl border-t border-white/[0.06] z-30">
         <div className="max-w-5xl mx-auto flex items-center justify-between">
           <div className="text-xs text-zinc-500">
-            训练 {trainings.length} 张 · 彩排 {rehearsals.length} 张 · 正式 1 张
+            训练 {trainingCount} 张 · 彩排 {rehearsalCount} 张 · 正式 1 张
           </div>
           <button className="btn-primary px-6" onClick={onGeneratePreview} disabled={busy}>生成预览</button>
         </div>
@@ -381,12 +346,12 @@ function ScoreCard ({ unitLabel, hours, coaches, participants, participantLabel,
       </div>
       <div className="grid grid-cols-2 gap-4">
         <div>
-          <label className="label">教官</label>
+          <label className="label">教官 *（必填）</label>
           <textarea className="input min-h-[64px] resize-y" placeholder="人名串，支持逗号、顿号、空格、换行分隔" value={coaches} onChange={e => onCoaches(e.target.value)} />
         </div>
         <div>
-          <label className="label">{participantLabel}</label>
-          <textarea className="input min-h-[64px] resize-y" placeholder="人名串，支持逗号、顿号、空格、换行分隔" value={participants} onChange={e => onParticipants(e.target.value)} />
+          <label className="label">{participantLabel}（可以留空）</label>
+          <textarea className="input min-h-[64px] resize-y" placeholder="没有参训队员就留空，例如对外带训" value={participants} onChange={e => onParticipants(e.target.value)} />
         </div>
       </div>
     </div>
