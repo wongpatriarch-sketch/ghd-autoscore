@@ -1,7 +1,7 @@
 {
   "name": "ghd-autoscore",
   "productName": "国护积分管理",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "国旗护卫队单机版积分管理与统计工具",
   "author": "国旗护卫队",
   "main": "dist-electron/main.js",
