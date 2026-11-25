@@ -47,7 +47,7 @@ export function round4 (n) {
   return +Number(n).toFixed(4)
 }
 
-// 把一次写入返回的 summaryFixed / uncalculatedFormulas 整理成给用户看的补充说明。
+// 把一次写入返回的 summaryFixed / uncalculatedFormulas / untouchedRows 整理成给用户看的补充说明。
 // 没有需要说明的情况时返回空字符串。
 export function summaryNote (data) {
   if (!data) return ''
@@ -61,6 +61,11 @@ export function summaryNote (data) {
       .map(x => `${x.name}（${x.from === null || x.from === undefined ? '空' : x.from} → ${x.to}）`)
       .join('、')
     parts.push(`有 ${list.length} 行的原汇总与明细对不上，已按明细重算：${shown}${list.length > 3 ? ' 等' : ''}`)
+  }
+  const untouched = data.untouchedRows
+  if (untouched && untouched.length) {
+    const shown = untouched.slice(0, 3).map(x => `第 ${x.row} 行「${x.name}」`).join('、')
+    parts.push(`有 ${untouched.length} 行的明细里没有任何分数、汇总格里却是算出了数值的公式（多半是合计行），程序没有改动：${shown}${untouched.length > 3 ? ' 等' : ''}`)
   }
   return parts.join('；')
 }

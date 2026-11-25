@@ -14,7 +14,7 @@ const NAV = [
   { key: 'history', label: '历史流水与撤销', icon: IconHistory }
 ]
 
-export default function Workspace ({ cfg, excel, onClose, reloadExcel, recordAfterWrite, notifyWritten, showAlert }) {
+export default function Workspace ({ cfg, excel, onClose, reloadExcel, recordAfterWrite, notifyWritten, showAlert, writing = false }) {
   const [tab, setTab] = useState('dashboard')
 
   // 各页面共用的上下文
@@ -56,7 +56,13 @@ export default function Workspace ({ cfg, excel, onClose, reloadExcel, recordAft
         </nav>
 
         <div className="p-4 border-t border-white/[0.06]">
-          <button onClick={onClose} className="w-full btn-ghost text-xs py-2">关闭项目并释放锁定</button>
+          {/* 写入分两步（改 Excel、登记历史），中途关闭项目会出现"表格改了、历史里没有这一笔"，所以写入期间按钮变灰 */}
+          <button
+            onClick={onClose}
+            disabled={writing}
+            title={writing ? '等右上角出现写入结果提示后即可关闭' : ''}
+            className="w-full btn-ghost text-xs py-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          >{writing ? '写入中，请稍候…' : '关闭项目并释放锁定'}</button>
         </div>
       </aside>
 
@@ -77,6 +83,15 @@ export default function Workspace ({ cfg, excel, onClose, reloadExcel, recordAft
           </div>
         </header>
 
+        {excel?.labelRows?.length > 0 && (
+          <div className="mx-8 mt-4 rounded-xl border border-sky-500/30 bg-sky-500/10 px-4 py-2.5 text-xs text-sky-300 flex items-start gap-2">
+            <IconAlert className="w-4 h-4 shrink-0 mt-px" />
+            <span>
+              主表里有 {excel.labelRows.length} 行不是队员，程序已跳过（不显示、不读取、也不改动）：
+              <b>{excel.labelRows.slice(0, 5).map(x => `第 ${x.row} 行「${x.name}」`).join('、')}</b>{excel.labelRows.length > 5 ? ' 等' : ''}。
+            </span>
+          </div>
+        )}
         {excel?.duplicateNames?.length > 0 && (
           <div className="mx-8 mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-300 flex items-start gap-2">
             <IconAlert className="w-4 h-4 shrink-0 mt-px" />

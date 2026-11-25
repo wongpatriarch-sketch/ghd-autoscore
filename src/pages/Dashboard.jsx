@@ -29,8 +29,9 @@ const headerLines = (name) => {
   return lines.length ? lines : ['（未命名）']
 }
 
-export default function Dashboard ({ excel }) {
-  const [mode, setMode] = useState('generation') // generation：按届数分组排名 | global：按总积分全局排名
+// initialMode：初始的排名方式（界面里不传，默认按届数分组；测试用它直接渲染"全局排名"的样子）
+export default function Dashboard ({ excel, initialMode }) {
+  const [mode, setMode] = useState(initialMode === 'global' ? 'global' : 'generation') // generation：按届数分组排名 | global：按总积分全局排名
   const [activityView, setActivityView] = useState('split') // split：每个活动一列 | merged：所有活动合成一列
 
   const activityColumns = excel?.activityColumns || []

@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import ProjectHub from './pages/ProjectHub.jsx'
 import Workspace from './components/Workspace.jsx'
 import { AlertModal, Toasts } from './components/ui.jsx'
-import { api } from './lib/api.js'
+import { api, isWriting, subscribeWriting, beginWrite, endWrite } from './lib/api.js'
 import { summaryNote } from './lib/utils.js'
 
 let toastSeq = 0
@@ -67,11 +67,17 @@ export default function App () {
   }, [reloadExcel])
 
   const closeProject = useCallback(async () => {
+    // 写入分两步（改 Excel、登记历史）。两步做完之前关闭项目，就会出现"表格改了、历史里却没有这一笔"。
+    // 按钮在写入期间已经是灰的，这里再拦一道：以计数为准，不依赖界面刷新得快慢
+    if (isWriting()) {
+      showAlert('分数正在写入 Excel、登记历史记录，通常一两秒内完成。请等右上角出现结果提示后，再关闭项目。', '请稍候再关闭')
+      return
+    }
     if (projectConfig) await api.closeProject(projectConfig.excelPath)
     setProjectConfig(null)
     setExcelData(null)
     setToasts([])
-  }, [projectConfig])
+  }, [projectConfig, showAlert])
 
   const saveConfig = useCallback(async (next) => {
     const res = await api.saveProject(next.configPath, next)
@@ -88,26 +94,37 @@ export default function App () {
   const recordAfterWrite = useCallback(async (res, mutator) => {
     const current = configRef.current
     if (!current || !res || !res.ok) return null
-    const next = mutator(structuredClone(current))
-    const saved = await saveConfig(next)
-    if (saved.ok) return saved.data
+    // 从这里到函数结束（保存历史记录，或者保存失败后的回滚）都属于"不能被打断的落盘"，计入"正在写入"
+    beginWrite()
+    try {
+      const next = mutator(structuredClone(current))
+      const saved = await saveConfig(next)
+      if (saved.ok) return saved.data
 
-    // 主进程返回的错误里已经带着"项目配置保存失败：原因"，直接用，不要再套一层同样的字样
-    const reason = saved.error || '项目配置保存失败（未知原因）'
-    const backup = res.data && res.data.backup
-    const rollback = backup ? await api.restoreBackup(current.excelPath, backup) : { ok: false, error: '主进程没有返回备份路径' }
-    if (rollback.ok) {
-      showAlert(`${reason}。本次对 Excel 的写入已经自动回滚，表格恢复到了写入前的状态，数据没有任何改变。`, '本次操作未生效')
-    } else {
-      showAlert(
-        `${reason}，并且 Excel 自动回滚没有成功（${rollback.error || '未知原因'}）。` +
-        `表格已经写入，但历史里没有这一笔。请关闭占用表格或配置文件的程序后手动处理。写入前的备份：${backup || '（无）'}`,
-        '需要人工处理'
-      )
+      // 主进程返回的错误里已经带着"项目配置保存失败：原因"，直接用，不要再套一层同样的字样
+      const reason = saved.error || '项目配置保存失败（未知原因）'
+      const backup = res.data && res.data.backup
+      const rollback = backup ? await api.restoreBackup(current.excelPath, backup) : { ok: false, error: '主进程没有返回备份路径' }
+      if (rollback.ok) {
+        showAlert(`${reason}。本次对 Excel 的写入已经自动回滚，表格恢复到了写入前的状态，数据没有任何改变。`, '本次操作未生效')
+      } else {
+        showAlert(
+          `${reason}，并且 Excel 自动回滚没有成功（${rollback.error || '未知原因'}）。` +
+          `表格里是本次写入之后的内容，历史里没有这一笔，请人工处理：关闭占用表格或配置文件的程序后，` +
+          `到表格旁边的 .backups 文件夹里找到写入前的备份${backup ? `「${backup.split(/[\\/]/).pop()}」` : ''}` +
+          '（文件名去掉开头的日期时间就是原来的表格文件名），把它复制过来替换主表即可恢复。',
+          '需要人工处理'
+        )
+      }
+      await reloadExcel(current)
+      return null
+    } finally {
+      endWrite()
     }
-    await reloadExcel(current)
-    return null
   }, [saveConfig, showAlert, reloadExcel])
+
+  // 有没有正在进行的写入：侧栏的"关闭项目"按钮据此变灰
+  const writing = useSyncExternalStore(subscribeWriting, isWriting)
 
   // 关闭前释放锁
   useEffect(() => {
@@ -131,6 +148,7 @@ export default function App () {
             recordAfterWrite={recordAfterWrite}
             notifyWritten={notifyWritten}
             showAlert={showAlert}
+            writing={writing}
           />
           )}
       <Toasts items={toasts} />

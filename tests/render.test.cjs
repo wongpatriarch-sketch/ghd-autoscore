@@ -18,10 +18,28 @@ esbuild.buildSync({
   logLevel: 'silent'
 })
 
-const { pages, parseNames, validateEventForm, computeEventScores, countCards, React } = require(bundlePath)
+const { pages, parseNames, summaryNote, validateEventForm, computeEventScores, countCards, React } = require(bundlePath)
 const { renderToString } = require('react-dom/server')
 
 const noop = () => {}
+// 从一段渲染结果里取出"包含指定文字的那个按钮"的起始标签（用来核对它是不是 disabled）
+const buttonTagWith = (html, text) => {
+  const i = html.indexOf(text)
+  assert(i >= 0, `渲染结果里没有「${text}」`)
+  const start = html.lastIndexOf('<button', i)
+  return html.slice(start, html.indexOf('>', start) + 1)
+}
+// 分段切换按钮组在界面上是一个 <div class="card p-1.5 …">，里面只有几个按钮：取出含指定文字的那一组
+const segmentedWith = (html, label) => {
+  const i = html.indexOf(label)
+  assert(i >= 0, `渲染结果里没有「${label}」`)
+  const start = html.lastIndexOf('<div class="card p-1.5', i)
+  return html.slice(start, html.indexOf('</div>', start))
+}
+// 历史页的一条记录在界面上是一行；表头行的类名不同，按数据行的起始类名切开正好只留下数据行（新在上）
+const historyRows = html => html.split('<tr class="border-b border-white/[0.04]').slice(1).map(r => r.slice(0, r.indexOf('</tr>')))
+// 相邻的两段文字在服务端渲染的结果里隔着一段 <!-- --> 注释；核对整句提示时先把它去掉
+const plain = html => html.split('<!-- -->').join('')
 // 数据形状与主进程 readWorkbook 的返回保持一致：前 6 列是固定列，第 7 列是空白分隔列，活动从第 8 列开始。
 // 队员的活动分按"列号"存（m.extras 的键是列号），有哪些活动列记在 activityColumns 里
 const members = [
@@ -48,12 +66,17 @@ const cfg = {
   locks: { is_logistics_imported: true, is_comprehensive_imported: false },
   history: [
     {
-      batchId: 'B1', timestamp: new Date().toISOString(), type: 'event_create',
+      batchId: 'B0', timestamp: '2026-10-01T08:00:00.000Z', type: 'event_edit',
+      objectKey: 'event::国庆出旗', label: '国庆出旗',
+      details: { 张三: 1 }, meta: { source: '修改自批次 Bx', memberCount: 1 }
+    },
+    {
+      batchId: 'B1', timestamp: '2026-10-02T08:00:00.000Z', type: 'event_create',
       objectKey: 'event::国庆出旗', label: '国庆出旗',
       details: { 张三: 3, 王五: 2 }, meta: { source: '活动积分结算引擎', memberCount: 2, headCoaches: ['赵六'], trainingCount: 1, rehearsalCount: 1, formalHours: 2 }
     },
     {
-      batchId: 'B2', timestamp: new Date().toISOString(), type: 'flag',
+      batchId: 'B2', timestamp: '2026-10-03T08:00:00.000Z', type: 'flag',
       objectKey: 'flag::B2', label: '升降旗考勤导入（日常升降旗）',
       details: { 张三: 1.5 }, meta: { source: '批量数据导入引擎', fileName: 'a.xlsx', rate: 0.5, targetCol: 3, memberCount: 1 },
       status: 'undone'
@@ -79,9 +102,25 @@ t('Workspace + Dashboard 渲染（含负分高亮/届别分组）', () => {
   assert(html.includes('2026秋季集训'))
   assert(html.includes('31 届'))
 })
-t('Dashboard 全局排序模式渲染', () => {
+t('Dashboard 默认按届数分组排名：有届别分组标题，名次是"组内名次 + 全局名次"', () => {
   const html = renderToString(React.createElement(pages.Dashboard, ctx))
-  assert(html.includes('按总积分全局排名'))
+  assert(html.includes('—— 31 届 ——') && html.includes('—— 30 届 ——'), '应有届别分组标题')
+  assert(html.includes('/ 全局第'), '分组模式下应同时显示全局名次')
+  const modeSwitch = segmentedWith(html, '按届数分组排名')
+  assert.strictEqual((modeSwitch.match(/bg-accent\/20/g) || []).length, 1, '排名方式的两个按钮里应恰好有一个处于选中状态')
+  assert(/bg-accent\/20[^>]*>按届数分组排名<\/button>/.test(modeSwitch), '默认选中的是"按届数分组排名"')
+})
+t('Dashboard 全局排序模式：没有届别分组，名次就是全局名次', () => {
+  const html = renderToString(React.createElement(pages.Dashboard, { ...ctx, initialMode: 'global' }))
+  assert(!html.includes('届 ——'), '全局模式下不应有届别分组标题')
+  assert(!html.includes('/ 全局第'), '全局模式下名次就是全局名次，不再另标')
+  assert(/bg-accent\/20[^>]*>按总积分全局排名<\/button>/.test(segmentedWith(html, '按总积分全局排名')), '选中的应是"按总积分全局排名"')
+  // 全局按汇总分从高到低：张三 6、王五 5、李四 -2
+  const order = ['张三', '王五', '李四'].map(n => html.indexOf(`>${n}</span>`))
+  assert(order[0] < order[1] && order[1] < order[2], `全局模式下的顺序不对：${order}`)
+  // 未知 / 拼错的参数一律退回默认的分组模式
+  const fallback = renderToString(React.createElement(pages.Dashboard, { ...ctx, initialMode: 'global ' }))
+  assert(fallback.includes('—— 31 届 ——'), 'initialMode 不是 global 时应按届数分组')
 })
 t('Dashboard 活动列分列 / 合并切换与固定列渲染', () => {
   const html = renderToString(React.createElement(pages.Dashboard, ctx))
@@ -118,16 +157,42 @@ t('EventScoring 动态表单渲染', () => {
   const html = renderToString(React.createElement(pages.EventScoring, ctx))
   assert(html.includes('全局表头信息'))
   assert(html.includes('正式出旗环节'))
+  // 训练 / 彩排卡片：教官必填、参训可以留空。label 里的"参训"和括号是两段文字，中间隔着 React 的占位注释，所以只搜后半截
+  assert(html.includes('教官 *（必填）') && html.includes('（可以留空）'), '训练 / 彩排卡片应标明"教官必填、参训可以留空"')
 })
 t('BatchImport 三引擎入口与互斥锁渲染', () => {
   const html = renderToString(React.createElement(pages.BatchImport, ctx))
   assert(html.includes('日常训练考勤'))
   assert(html.includes('后勤部（D 列）'))
 })
-t('HistoryCenter 版本栈状态渲染（活跃/锁定/已撤销）', () => {
+t('HistoryCenter 版本栈状态渲染：同一活动的较早记录锁定、最新记录活跃、撤销过的标成已撤销', () => {
   const html = renderToString(React.createElement(pages.HistoryCenter, ctx))
   assert(html.includes('国庆出旗'))
-  assert(html.includes('已撤销'))
+  // 页面顶部的说明文字里也有"活跃""锁定"四个字，所以要认徽标本身（文字紧跟着 </svg> 或者被 <span> 包住）
+  assert(html.includes('>活跃</span>'), '栈顶记录应有"活跃"徽标')
+  assert(/<\/svg>锁定/.test(html), '栈顶下面的记录应有"锁定"徽标')
+  assert(html.includes('>已撤销</span>'), '撤销过的记录应有"已撤销"徽标')
+  assert(html.includes('仅栈顶（最新）记录可撤销'), '锁定记录的撤销按钮应带说明')
+  // 列表新在上：B2（已撤销）、B1（活跃）、B0（锁定）
+  const rows = historyRows(html)
+  assert.strictEqual(rows.length, 3, `应有 3 行记录，实际 ${rows.length}`)
+  const [undone, active, locked] = rows
+  // 栈顶记录：徽标是"活跃"，"修改""撤销"两个按钮都能点
+  assert(active.includes('>活跃</span>') && active.includes('>修改</button>'), '栈顶记录应有"活跃"徽标和"修改"按钮')
+  assert(!/\sdisabled=""/.test(buttonTagWith(active, '撤销')), '栈顶记录的撤销按钮应可点')
+  // 栈顶下面的记录：徽标是"锁定"，没有"修改"按钮，撤销按钮是灰的并说明原因
+  assert(locked.includes('</svg>锁定'), '栈顶下面的记录应有"锁定"徽标')
+  assert(!locked.includes('>修改</button>'), '锁定记录不应有"修改"按钮')
+  const lockedBtn = buttonTagWith(locked, '撤销')
+  assert(/\sdisabled=""/.test(lockedBtn) && lockedBtn.includes('仅栈顶（最新）记录可撤销'), `锁定记录的撤销按钮应变灰并带说明：${lockedBtn}`)
+  // 已撤销的记录：整行变淡，不能再撤销
+  assert(undone.startsWith(' hover:bg-white/[0.03] transition opacity-50"'), '已撤销的记录整行应变淡')
+  assert(undone.includes('>已撤销</span>') && !undone.includes('>修改</button>'), '已撤销的记录应有"已撤销"徽标')
+  // 「已撤销」徽标里也有"撤销"两个字，所以从按钮文字前面的尖括号开始找
+  assert(/\sdisabled=""/.test(buttonTagWith(undone, '>撤销</button>')), '已撤销的记录不能再撤销')
+  // 只有一处"活跃"徽标、一处"锁定"徽标
+  assert.strictEqual(html.split('>活跃</span>').length - 1, 1)
+  assert.strictEqual(html.split('</svg>锁定').length - 1, 1)
 })
 
 // ---------- 名单分词（活动结算页各个名单框共用） ----------
@@ -152,6 +217,29 @@ t('parseNames：只靠空格隔开的多个带空格名字没法确定断法，�
   assert.strictEqual(names('张\t三'), JSON.stringify(['张', '三']), '制表符两侧是两格内容，不算同一个名字')
   assert.strictEqual(names('艾克拜尔·司马义'), JSON.stringify(['艾克拜尔·司马义']), '带间隔号的姓名原样保留')
   assert.strictEqual(names('张三 李四'), JSON.stringify(['张三', '李四']), '普通的空格分隔不受影响')
+})
+
+t('Workspace：主表里有合计 / 备注这类不是队员的行时，顶部给出提示', () => {
+  assert(!plain(renderToString(React.createElement(pages.Workspace, ctx))).includes('行不是队员'), '没有这类行时不显示提示')
+  const two = plain(renderToString(React.createElement(pages.Workspace, { ...ctx, excel: { ...excel, labelRows: [{ row: 9, name: '合计' }, { row: 14, name: '备注：10 月起按新标准' }] } })))
+  assert(two.includes('主表里有 2 行不是队员，程序已跳过（不显示、不读取、也不改动）'), '提示里应说明跳过了几行、是怎么处理的')
+  assert(two.includes('<b>第 9 行「合计」、第 14 行「备注：10 月起按新标准」</b>'), '提示里应列出是哪几行')
+  // 超过 5 行时只列前 5 行，后面用"等"带过
+  const many = Array.from({ length: 7 }, (_, i) => ({ row: i + 2, name: `合计${i + 1}` }))
+  const seven = plain(renderToString(React.createElement(pages.Workspace, { ...ctx, excel: { ...excel, labelRows: many } })))
+  assert(seven.includes('主表里有 7 行不是队员') && seven.includes('第 6 行「合计5」</b> 等。'), '超过 5 行时应只列前 5 行')
+  assert(!seven.includes('合计6') && !seven.includes('合计7'), '第 6、7 行的名称不应出现在提示里')
+})
+t('Workspace：写入进行中时"关闭项目"按钮变灰', () => {
+  const html = renderToString(React.createElement(pages.Workspace, { ...ctx, writing: true }))
+  const tag = buttonTagWith(html, '写入中，请稍候…')
+  assert(/\sdisabled=""/.test(tag), `写入期间按钮应是 disabled：${tag}`)
+  assert(html.includes('等右上角出现写入结果提示后即可关闭'), '悬停提示应说明什么时候可以关闭')
+  assert(!html.includes('关闭项目并释放锁定'), '写入期间不应再显示平时的按钮文字')
+  const idle = renderToString(React.createElement(pages.Workspace, ctx))
+  // 按钮的类名里带着 disabled:opacity-50 这类样式，所以不能直接搜 "disabled"，要看有没有 disabled="" 这个属性
+  assert(!/\sdisabled=""/.test(buttonTagWith(idle, '关闭项目并释放锁定')), '不在写入时按钮应可点')
+  assert(!idle.includes('写入中，请稍候…'))
 })
 
 // ---------- 活动结算表单的校验与计分（src/lib/eventForm.js） ----------
@@ -246,6 +334,29 @@ t('computeEventScores：多张卡片累加；名单里不在名册的名字按"�
   // 所有人都被忽略：同样是 0 人
   const allIgnored = computeEventScores({ ...baseForm(), rosterSet: new Set(), dupSet }, { 赵六: null, 李四: null, 王五: null, 张三: null })
   assert.deepStrictEqual(allIgnored, { rows: [], scores: {} })
+})
+
+t('summaryNote：汇总被纠正 / 公式没有保存结果 / 没有改动的公式行，分别说明', () => {
+  assert.strictEqual(summaryNote(undefined), '')
+  assert.strictEqual(summaryNote({}), '')
+  assert.strictEqual(summaryNote({ summaryFixed: [], uncalculatedFormulas: 0, untouchedRows: [] }), '')
+  const fixedText = '有 4 行的原汇总与明细对不上，已按明细重算：张三（空 → 3）、李四（9 → 1）、王五（4 → 2） 等'
+  const untouchedText = '有 1 行的明细里没有任何分数、汇总格里却是算出了数值的公式（多半是合计行），程序没有改动：第 30 行「全体」'
+  assert.strictEqual(summaryNote({
+    summaryFixed: [{ name: '张三', from: null, to: 3 }, { name: '李四', from: 9, to: 1 }, { name: '王五', from: 4, to: 2 }, { name: '赵六', from: 1, to: 1 }]
+  }), fixedText)
+  assert.strictEqual(summaryNote({ untouchedRows: [{ name: '全体', row: 30, summary: 12 }] }), untouchedText)
+  // 几种情况同时出现时按"公式没有保存结果 → 汇总被纠正 → 没有改动的公式行"的顺序用分号连起来
+  const note = summaryNote({
+    uncalculatedFormulas: 2,
+    summaryFixed: [{ name: '张三', from: null, to: 3 }, { name: '李四', from: 9, to: 1 }, { name: '王五', from: 4, to: 2 }, { name: '赵六', from: 1, to: 1 }],
+    untouchedRows: [{ name: '全体', row: 30, summary: 12 }]
+  })
+  assert(note.startsWith('主表有 2 个公式单元格没有保存计算结果，本次按 0 计入汇总；用 Excel 或 WPS 打开主表保存一次后，再做任意一次写入就会自动纠正；'), note)
+  assert(note.endsWith(`${fixedText}；${untouchedText}`), note)
+  // 超过 3 行只列前 3 行
+  const many = summaryNote({ untouchedRows: [{ name: '甲', row: 2 }, { name: '乙', row: 3 }, { name: '丙', row: 4 }, { name: '丁', row: 5 }] })
+  assert.strictEqual(many, '有 4 行的明细里没有任何分数、汇总格里却是算出了数值的公式（多半是合计行），程序没有改动：第 2 行「甲」、第 3 行「乙」、第 4 行「丙」 等')
 })
 
 console.log(`\n${passed} 项渲染测试通过${process.exitCode ? '（存在失败项）' : ''}`)
