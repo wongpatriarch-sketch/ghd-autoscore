@@ -32,7 +32,7 @@
 
 ## 下载与安装
 
-1. 到 [Releases](https://github.com/wongpatriarch-sketch/ghd-autoscore/releases) 页面下载最新版本的 `国护积分管理 Setup x.x.x.exe`。
+1. 到 [Releases](https://github.com/wongpatriarch-sketch/ghd-autoscore/releases) 页面下载最新版本的安装包。发布页上显示的名字是「国护积分管理 安装包 x.x.x（Windows）」，保存到电脑上的文件名是 `ghd-autoscore-Setup-x.x.x.exe`（GitHub 不保留中文文件名）。
 2. 双击安装包，按提示完成安装（一键安装，不需要选择安装目录）。
 3. 安装包没有数字签名，第一次运行时 Windows 可能提示「Windows 已保护你的电脑」。点「更多信息」，再点「仍要运行」即可。
 4. 从旧版本升级时，建议先卸载旧版本再安装。v1.0.0 和 v1.0.1 的安装包存在启动报错的问题，请不要使用。
