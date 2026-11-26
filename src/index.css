@@ -34,6 +34,17 @@ body {
       text-zinc-100 placeholder-zinc-500 outline-none transition
       focus:border-accent/60 focus:ring-2 focus:ring-accent/20;
   }
+  /* 下拉框（<select>）不用系统自带的外观：Windows 上带系统外观的下拉框一旦指定了
+     「微软雅黑」这类中文字体，框里的中文会被画花（「1.0 小时」的「时」缺笔画、大小不一），
+     且截图和真实屏幕上都是如此。改成由页面自己画右侧的小箭头后显示正常；
+     点开后的选项列表仍然是系统自带的深色样式。 */
+  select.input {
+    @apply appearance-none cursor-pointer;
+    padding-right: 1.9rem;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.65rem center;
+  }
   .btn {
     @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium
       transition select-none disabled:opacity-40 disabled:cursor-not-allowed;
