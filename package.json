@@ -4,6 +4,7 @@
   "version": "1.0.4",
   "description": "国旗护卫队单机版积分管理与统计工具",
   "author": "国旗护卫队",
+  "license": "MIT",
   "main": "dist-electron/main.js",
   "private": true,
   "scripts": {
